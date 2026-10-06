@@ -25,11 +25,28 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  orders:
+    build: ./orders
+    container_name: pizza-orders
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      ORDERS_DB_PATH: /data/orders.db
+      SEED_DATA: "1"
+    volumes:
+      - orders_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   kitchen:
     build: ./kitchen
     container_name: pizza-kitchen
     environment:
       RABBITMQ_HOST: rabbitmq
+      KITCHEN_DB_PATH: /data/kitchen.db
+      SEED_DATA: "1"
+    volumes:
+      - kitchen_data:/data
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -39,6 +56,15 @@ services:
     container_name: pizza-delivery
     environment:
       RABBITMQ_HOST: rabbitmq
+      DELIVERY_DB_PATH: /data/delivery.db
+      SEED_DATA: "1"
+    volumes:
+      - delivery_data:/data
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+volumes:
+  orders_data:
+  kitchen_data:
+  delivery_data:
