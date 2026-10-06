@@ -13,14 +13,19 @@ asynchronously.
 
 ```mermaid
 flowchart LR
-    Client -->|HTTP| Gateway
-    Gateway -->|RPC orders_rpc| Orders
-    Orders -->|kitchen_orders| Kitchen
-    Kitchen -->|delivery_orders| Delivery
-    Kitchen -->|status| Status[order_status]
-    Delivery -->|status| Status
-    Status -->|consume| Orders
+    Client([Client]) -->|"HTTP"| Gateway[Gateway]
+    Gateway -->|"orders_rpc"| Orders[Orders]
+    Orders -->|"kitchen_orders"| Kitchen[Kitchen]
+    Kitchen -->|"delivery_orders"| Delivery[Delivery]
+    Kitchen -->|"order_status"| Orders
+    Delivery -->|"order_status"| Orders
 ```
+
+Nodes are services, and every edge label is a RabbitMQ queue name. The Gateway
+calls Orders synchronously over RPC on `orders_rpc`; all other arrows are
+asynchronous messages. Kitchen and Delivery report every status change
+(`cooking`, `ready`, `delivering`, `delivered`, `rejected`) to the shared
+`order_status` queue, which Orders consumes to update the order history.
 
 Service responsibilities:
 
