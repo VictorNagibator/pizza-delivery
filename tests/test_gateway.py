@@ -95,3 +95,146 @@ def test_history_service_unavailable(gateway, gateway_client, monkeypatch):
 
     assert response.status_code == 503
     assert 'History service is unavailable' in response.get_json()['error']
+
+
+# 8. Menu management and search routes go to the menu queue
+def test_menu_management_routes(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc({'status': 200, 'body': {}})
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    gateway_client.get('/menu/search?q=cheese&min_price=400&max_price=700')
+    gateway_client.post('/menu', json={'code': 'siciliana', 'name': 'Siciliana', 'price': 700})
+    gateway_client.patch('/menu/pepperoni/price', json={'price': 600})
+
+    assert fake.calls == [
+        (gateway.MENU_QUEUE, {
+            'action': 'search_menu',
+            'payload': {'q': 'cheese', 'min_price': '400', 'max_price': '700'},
+        }),
+        (gateway.MENU_QUEUE, {
+            'action': 'add_pizza',
+            'payload': {'code': 'siciliana', 'name': 'Siciliana', 'price': 700},
+        }),
+        (gateway.MENU_QUEUE, {
+            'action': 'update_price',
+            'payload': {'code': 'pepperoni', 'price': 600},
+        }),
+    ]
+
+
+# 9. Order statistics, status filtering and cancellation go to orders
+def test_order_management_routes(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc({'status': 200, 'body': {}})
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    gateway_client.get('/orders/stats')
+    gateway_client.get('/orders/status/delivered')
+    gateway_client.post('/orders/5/cancel')
+
+    assert fake.calls == [
+        (gateway.ORDERS_QUEUE, {'action': 'get_order_stats', 'payload': None}),
+        (gateway.ORDERS_QUEUE, {
+            'action': 'list_orders_by_status',
+            'payload': {'status': 'delivered'},
+        }),
+        (gateway.ORDERS_QUEUE, {
+            'action': 'cancel_order',
+            'payload': {'order_id': 5},
+        }),
+    ]
+
+
+# 10. History latest/events/stats routes go to the history queue
+def test_history_extended_routes(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc({'status': 200, 'body': {}})
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    gateway_client.get('/orders/5/history/latest')
+    gateway_client.get('/history/events?limit=10&offset=2&status=rejected')
+    gateway_client.get('/history/stats')
+
+    assert fake.calls == [
+        (gateway.HISTORY_QUEUE, {
+            'action': 'get_latest_status',
+            'payload': {'order_id': 5},
+        }),
+        (gateway.HISTORY_QUEUE, {
+            'action': 'list_events',
+            'payload': {'limit': '10', 'offset': '2', 'status': 'rejected'},
+        }),
+        (gateway.HISTORY_QUEUE, {'action': 'get_history_stats', 'payload': None}),
+    ]
+
+
+# 11. Kitchen management routes go to the kitchen queue
+def test_kitchen_routes(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc({'status': 200, 'body': {}})
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    gateway_client.get('/kitchen/recipes')
+    gateway_client.get('/kitchen/recipes/pepperoni')
+    gateway_client.get('/kitchen/stock')
+    gateway_client.post('/kitchen/availability', json={'pizza': 'pepperoni', 'quantity': 2})
+    gateway_client.post('/kitchen/stock/basil/restock', json={'amount': 50})
+    gateway_client.put('/kitchen/stock/basil', json={'amount': 100})
+    gateway_client.get('/kitchen/orders?limit=5')
+    gateway_client.get('/kitchen/orders/3')
+
+    assert fake.calls == [
+        (gateway.KITCHEN_QUEUE, {'action': 'recipes', 'payload': None}),
+        (gateway.KITCHEN_QUEUE, {'action': 'recipe', 'payload': {'code': 'pepperoni'}}),
+        (gateway.KITCHEN_QUEUE, {'action': 'stock', 'payload': None}),
+        (gateway.KITCHEN_QUEUE, {
+            'action': 'check_availability',
+            'payload': {'pizza': 'pepperoni', 'quantity': 2},
+        }),
+        (gateway.KITCHEN_QUEUE, {
+            'action': 'restock',
+            'payload': {'ingredient': 'basil', 'amount': 50},
+        }),
+        (gateway.KITCHEN_QUEUE, {
+            'action': 'set_stock',
+            'payload': {'ingredient': 'basil', 'amount': 100},
+        }),
+        (gateway.KITCHEN_QUEUE, {'action': 'orders', 'payload': {'limit': '5'}}),
+        (gateway.KITCHEN_QUEUE, {'action': 'order', 'payload': {'order_id': 3}}),
+    ]
+
+
+# 12. Delivery management routes go to the delivery queue
+def test_delivery_routes(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc({'status': 200, 'body': {}})
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    gateway_client.get('/delivery/couriers')
+    gateway_client.post('/delivery/couriers', json={'name': 'Nina', 'phone': '+7-900'})
+    gateway_client.get('/delivery/couriers/2')
+    gateway_client.get('/delivery/deliveries?limit=10')
+    gateway_client.get('/delivery/deliveries/5')
+    gateway_client.get('/delivery/stats')
+
+    assert fake.calls == [
+        (gateway.DELIVERY_QUEUE, {'action': 'couriers', 'payload': None}),
+        (gateway.DELIVERY_QUEUE, {
+            'action': 'register_courier',
+            'payload': {'name': 'Nina', 'phone': '+7-900'},
+        }),
+        (gateway.DELIVERY_QUEUE, {'action': 'courier', 'payload': {'courier_id': 2}}),
+        (gateway.DELIVERY_QUEUE, {'action': 'deliveries', 'payload': {'limit': '10'}}),
+        (gateway.DELIVERY_QUEUE, {'action': 'delivery', 'payload': {'order_id': 5}}),
+        (gateway.DELIVERY_QUEUE, {'action': 'delivery_stats', 'payload': None}),
+    ]
+
+
+# 13. Kitchen and delivery failures are reported separately
+def test_kitchen_and_delivery_unavailable(gateway, gateway_client, monkeypatch):
+    fake = FakeRpc(error=TimeoutError('no response'))
+    monkeypatch.setattr(gateway, 'rpc', fake)
+
+    response = gateway_client.get('/kitchen/stock')
+    assert response.status_code == 503
+    assert 'Kitchen service is unavailable' in response.get_json()['error']
+
+    response = gateway_client.get('/delivery/couriers')
+    assert response.status_code == 503
+    assert 'Delivery service is unavailable' in response.get_json()['error']

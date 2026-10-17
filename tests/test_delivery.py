@@ -1,5 +1,9 @@
 import json
 
+import pytest
+
+from delivery_logic import CourierAlreadyExists
+
 
 # RabbitMQ channel stub
 class FakeChannel:
@@ -121,3 +125,90 @@ def test_process_delivery_publishes_statuses(delivery_module, monkeypatch):
 
     assert delivery_module.dispatcher.get_delivery(500)['status'] == 'delivered'
     assert channel.acked == [1]
+
+
+# 8. Couriers can be listed, looked up, registered and aggregated
+def test_couriers_and_stats(dispatcher):
+    couriers = dispatcher.list_couriers()
+    assert len(couriers) == 4
+
+    created = dispatcher.register_courier('Nina', '+7-900-000-02-01')
+    assert created['name'] == 'Nina'
+    assert created['status'] == 'free'
+
+    assert dispatcher.get_courier(created['id'])['name'] == 'Nina'
+    assert dispatcher.get_courier(999999) is None
+
+    with pytest.raises(CourierAlreadyExists):
+        dispatcher.register_courier('Nina', '+7-900-000-02-02')
+
+    with pytest.raises(ValueError):
+        dispatcher.register_courier('', '')
+
+    dispatcher.assign(300, '3 Main Street')
+    dispatcher.complete(300)
+
+    stats = dispatcher.get_stats()
+    assert stats['total_deliveries'] == 1
+    assert stats['by_status']['delivered'] == 1
+    assert stats['couriers']['total'] == 5
+    assert stats['couriers']['free'] == 5
+
+
+# 9. Deliveries can be listed
+def test_list_deliveries(dispatcher):
+    dispatcher.assign(400, '4 Main Street')
+    dispatcher.assign(401, '5 Main Street')
+
+    deliveries = dispatcher.list_deliveries(limit=1)
+    assert len(deliveries) == 1
+    assert deliveries[0]['order_id'] in (400, 401)
+
+
+# 10. The RPC handler exposes couriers, deliveries and statistics
+def test_rpc_handler(delivery_module):
+    status, body = delivery_module.handle_request({'action': 'couriers'})
+    assert status == 200
+    assert len(body) >= 4
+    assert any(courier['name'] == 'Alex' for courier in body)
+
+    status, created = delivery_module.handle_request({
+        'action': 'register_courier',
+        'payload': {'name': 'RPC Courier', 'phone': '+7-900-000-03-01'},
+    })
+    assert status == 201
+    assert created['name'] == 'RPC Courier'
+
+    status, _ = delivery_module.handle_request({
+        'action': 'register_courier',
+        'payload': {'name': 'RPC Courier', 'phone': '+7-900-000-03-02'},
+    })
+    assert status == 409
+
+    status, body = delivery_module.handle_request({
+        'action': 'courier', 'payload': {'courier_id': created['id']}})
+    assert status == 200
+
+    status, _ = delivery_module.handle_request({
+        'action': 'courier', 'payload': {'courier_id': 999999}})
+    assert status == 404
+
+    delivery_module.dispatcher.assign(500, '6 Main Street')
+
+    status, body = delivery_module.handle_request({
+        'action': 'deliveries', 'payload': {'limit': 10}})
+    assert status == 200
+    assert any(item['order_id'] == 500 for item in body)
+
+    status, body = delivery_module.handle_request({
+        'action': 'delivery', 'payload': {'order_id': 500}})
+    assert status == 200
+    assert body['status'] == 'delivering'
+
+    status, _ = delivery_module.handle_request({
+        'action': 'delivery', 'payload': {'order_id': 999999}})
+    assert status == 404
+
+    status, body = delivery_module.handle_request({'action': 'delivery_stats'})
+    assert status == 200
+    assert 'by_status' in body

@@ -2,7 +2,7 @@ import os
 import json
 import pika
 
-from menu_logic import MenuService
+from menu_logic import MenuService, PizzaAlreadyExists
 
 # RabbitMQ address comes from the environment
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
@@ -37,6 +37,34 @@ def handle_request(request):
         item = service.get_pizza(payload.get('pizza', payload.get('code')))
         if item is None:
             return 404, {'error': 'Pizza not found'}
+        return 200, item
+
+    if action == 'search_menu':
+        try:
+            items = service.search_menu(
+                payload.get('q'),
+                payload.get('min_price'),
+                payload.get('max_price'))
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 200, items
+
+    if action == 'add_pizza':
+        try:
+            item = service.add_pizza(payload)
+        except PizzaAlreadyExists as error:
+            return 409, {'error': str(error)}
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 201, item
+
+    if action == 'update_price':
+        try:
+            item = service.update_price(payload.get('code'), payload.get('price'))
+        except KeyError:
+            return 404, {'error': 'Pizza not found'}
+        except ValueError as error:
+            return 400, {'error': str(error)}
         return 200, item
 
     return 404, {'error': f'Unknown action: {action}'}

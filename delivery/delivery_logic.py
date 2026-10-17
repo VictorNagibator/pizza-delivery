@@ -1,4 +1,11 @@
+import sqlite3
+
 import delivery_db
+
+
+# Raised when a courier with the same name is already registered
+class CourierAlreadyExists(Exception):
+    pass
 
 
 # Dispatcher assigns couriers and tracks their load in its own database
@@ -15,13 +22,40 @@ class Dispatcher:
     def list_couriers(self):
         return delivery_db.list_couriers(self.db_path)
 
+    # Returns one courier by id
+    def get_courier(self, courier_id):
+        return delivery_db.get_courier(courier_id, self.db_path)
+
     # Adds a new courier
     def register_courier(self, name, phone):
-        return delivery_db.register_courier(name, phone, self.db_path)
+        name = str(name or '').strip()
+        phone = str(phone or '').strip()
+        if not name or not phone:
+            raise ValueError('"name" and "phone" must not be empty')
+
+        try:
+            courier_id = delivery_db.register_courier(name, phone, self.db_path)
+        except sqlite3.IntegrityError:
+            raise CourierAlreadyExists(f'Courier "{name}" already exists')
+        return delivery_db.get_courier(courier_id, self.db_path)
 
     # Returns a delivery by order id
     def get_delivery(self, order_id):
         return delivery_db.get_delivery_by_order(order_id, self.db_path)
+
+    # Returns recent deliveries
+    def list_deliveries(self, limit=50):
+        try:
+            limit = int(limit if limit not in (None, '') else 50)
+        except (TypeError, ValueError):
+            raise ValueError('"limit" must be an integer')
+        if limit < 1 or limit > 200:
+            raise ValueError('"limit" must be between 1 and 200')
+        return delivery_db.list_deliveries(self.db_path, limit)
+
+    # Returns aggregate delivery statistics
+    def get_stats(self):
+        return delivery_db.get_stats(self.db_path)
 
     # Assigns an order to the least loaded free courier.
     # A free courier is chosen by the smallest number of deliveries.

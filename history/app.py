@@ -9,6 +9,10 @@ RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 RPC_QUEUE = 'history_rpc'
 EVENTS_QUEUE = 'order_history'
 
+# Topic exchange used by generated AsyncAPI clients (Hermes publishes to it).
+# The default exchange still works because the queue keeps its name binding.
+EVENTS_EXCHANGE = 'amq.topic'
+
 # Status history backed by its own database
 history = HistoryService()
 
@@ -39,6 +43,28 @@ def handle_request(request):
         if entries is None:
             return 404, {'error': 'Order not found'}
         return 200, entries
+
+    if action == 'get_latest_status':
+        try:
+            entry = history.get_latest_status(payload.get('order_id'))
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        if entry is None:
+            return 404, {'error': 'Order not found'}
+        return 200, entry
+
+    if action == 'list_events':
+        try:
+            events = history.list_events(
+                payload.get('limit'),
+                payload.get('offset'),
+                payload.get('status'))
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 200, events
+
+    if action == 'get_history_stats':
+        return 200, history.get_stats()
 
     return 404, {'error': f'Unknown action: {action}'}
 
@@ -73,13 +99,27 @@ def on_event(ch, method, properties, body):
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
+# Declares broker topology owned by this consumer.
+# It is idempotent and is the right place for queue/exchange bindings:
+# a consumer owns its queue, while publishers only publish messages.
+def declare_topology(channel):
+    channel.exchange_declare(
+        exchange=EVENTS_EXCHANGE, exchange_type='topic', durable=True)
+    channel.queue_declare(queue=RPC_QUEUE, durable=True)
+    channel.queue_declare(queue=EVENTS_QUEUE, durable=True)
+    channel.queue_bind(
+        queue=EVENTS_QUEUE,
+        exchange=EVENTS_EXCHANGE,
+        routing_key=EVENTS_QUEUE,
+    )
+
+
 # Starts the RPC consumer and the event consumer
 def main():
     connection = get_rabbitmq_connection()
     channel = connection.channel()
 
-    channel.queue_declare(queue=RPC_QUEUE, durable=True)
-    channel.queue_declare(queue=EVENTS_QUEUE, durable=True)
+    declare_topology(channel)
     channel.basic_qos(prefetch_count=1)
 
     channel.basic_consume(queue=RPC_QUEUE, on_message_callback=on_request)

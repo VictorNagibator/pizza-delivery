@@ -1,4 +1,11 @@
+import re
+
 import kitchen_db
+
+
+# Normalizes a pizza name: "Four Cheese" -> "four_cheese"
+def normalize_pizza(pizza):
+    return re.sub(r'[\s\-]+', '_', str(pizza).strip().lower())
 
 
 # Writes the order processing result to the kitchen journal
@@ -37,6 +44,54 @@ class Kitchen:
     def get_stock(self):
         return kitchen_db.get_stock(self.db_path)
 
+    # Checks whether the kitchen can cook the given pizza right now
+    def check_availability(self, pizza, quantity=1):
+        code = normalize_pizza(pizza)
+
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            raise ValueError('"quantity" must be an integer')
+        if quantity < 1:
+            raise ValueError('Quantity must be at least 1')
+
+        with kitchen_db.get_connection(self.db_path) as connection:
+            recipe = connection.execute(
+                'SELECT code, name, cook_time FROM recipes WHERE code = ?', (code,)).fetchone()
+            if recipe is None:
+                raise KeyError(code)
+
+            required = connection.execute('''
+                SELECT ri.ingredient, ri.amount, i.unit, i.stock
+                FROM recipe_ingredients ri
+                JOIN ingredients i ON i.name = ri.ingredient
+                WHERE ri.recipe_code = ?
+                ORDER BY ri.ingredient
+            ''', (code,)).fetchall()
+
+        ingredients = []
+        missing = []
+        for row in required:
+            need = row['amount'] * quantity
+            ingredients.append({
+                'ingredient': row['ingredient'],
+                'unit': row['unit'],
+                'per_pizza': row['amount'],
+                'required': need,
+                'stock': row['stock'],
+            })
+            if row['stock'] < need:
+                missing.append(row['ingredient'])
+
+        return {
+            'pizza': code,
+            'pizza_name': recipe['name'],
+            'quantity': quantity,
+            'available': not missing,
+            'missing': missing,
+            'ingredients': ingredients,
+        }
+
     # Adds stock to an ingredient
     def restock(self, ingredient, amount):
         return kitchen_db.restock(ingredient, amount, self.db_path)
@@ -48,6 +103,16 @@ class Kitchen:
     # Returns the kitchen journal record for an order
     def get_order(self, order_id):
         return kitchen_db.get_kitchen_order(order_id, self.db_path)
+
+    # Returns recent kitchen journal records
+    def list_orders(self, limit=50):
+        try:
+            limit = int(limit if limit not in (None, '') else 50)
+        except (TypeError, ValueError):
+            raise ValueError('"limit" must be an integer')
+        if limit < 1 or limit > 200:
+            raise ValueError('"limit" must be between 1 and 200')
+        return kitchen_db.list_kitchen_orders(limit, self.db_path)
 
     # Cooks a pizza: checks the recipe, consumes ingredients, writes the journal
     def cook(self, order_id, pizza, quantity=1):

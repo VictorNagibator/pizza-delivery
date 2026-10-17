@@ -197,3 +197,92 @@ def test_create_order_when_menu_is_unavailable(orders, monkeypatch):
 
     assert status == 503
     assert 'Menu service is unavailable' in body['error']
+
+
+# 11. Orders can be filtered by status and aggregated
+def test_list_orders_by_status_and_stats(order_service):
+    first = order_service.create_order({'pizza': 'Pepperoni', 'address': '1 Main Street'})
+    second = order_service.create_order({'pizza': 'Margherita', 'address': '2 Main Street'})
+    order_service.update_status(first['order_id'], 'delivered', courier='Alex')
+
+    delivered = order_service.list_orders_by_status('delivered')
+    assert [order['id'] for order in delivered] == [first['order_id']]
+
+    new_orders = order_service.list_orders_by_status('new')
+    assert [order['id'] for order in new_orders] == [second['order_id']]
+
+    with pytest.raises(ValueError):
+        order_service.list_orders_by_status('unknown')
+
+    stats = order_service.get_order_stats()
+    assert stats['total_orders'] == 2
+    assert stats['by_status']['delivered']['count'] == 1
+    assert stats['by_status']['new']['count'] == 1
+    assert stats['total_revenue'] == first['total_price'] + second['total_price']
+
+
+# 12. A new order can be cancelled, but a final order cannot
+def test_cancel_order(order_service):
+    created = order_service.create_order({'pizza': 'Hawaiian', 'address': '3 Main Street'})
+
+    cancelled = order_service.cancel_order(created['order_id'])
+    assert cancelled['status'] == 'cancelled'
+
+    with pytest.raises(ValueError):
+        order_service.cancel_order(created['order_id'])
+
+    with pytest.raises(KeyError):
+        order_service.cancel_order(999999)
+
+
+# 13. Cancellation through RPC publishes a history event
+def test_cancel_order_rpc_publishes_history(orders):
+    created = orders.service.create_order({'pizza': 'Diablo', 'address': '4 Main Street'})
+    order_id = created['order_id']
+
+    channel = FakeChannel()
+    props = FakeProperties(reply_to='amq.gen-callback', correlation_id='corr-cancel')
+    body = json.dumps({
+        'action': 'cancel_order',
+        'payload': {'order_id': order_id},
+    })
+
+    orders.on_request(channel, FakeMethod(delivery_tag=5), props, body)
+
+    reply = next(item for item in channel.published if item['routing_key'] == 'amq.gen-callback')
+    assert reply['body']['status'] == 200
+    assert reply['body']['body']['status'] == 'cancelled'
+
+    history_messages = [item for item in channel.published
+                        if item['routing_key'] == orders.HISTORY_QUEUE]
+    assert history_messages[-1]['body']['status'] == 'cancelled'
+    assert channel.acked == [5]
+
+
+# 14. A late kitchen/delivery status does not overwrite a cancelled order
+def test_status_event_ignored_after_cancel(orders):
+    created = orders.service.create_order({'pizza': 'Margherita', 'address': '5 Main Street'})
+    order_id = created['order_id']
+    orders.service.cancel_order(order_id)
+
+    channel = FakeChannel()
+    orders.on_status(channel, FakeMethod(delivery_tag=6), None, json.dumps({
+        'order_id': order_id, 'status': 'cooking'}))
+
+    assert orders.service.get_order(order_id)['status'] == 'cancelled'
+    assert channel.published == []
+    assert channel.acked == [6]
+
+
+# 15. RPC returns 409 when a final order is cancelled
+def test_cancel_final_order_returns_conflict(orders):
+    created = orders.service.create_order({'pizza': 'Pepperoni', 'address': '6 Main Street'})
+    orders.service.update_status(created['order_id'], 'delivered', courier='Maria')
+
+    status, body = orders.handle_request({
+        'action': 'cancel_order',
+        'payload': {'order_id': created['order_id']},
+    })
+
+    assert status == 409
+    assert 'cannot be cancelled' in body['error']

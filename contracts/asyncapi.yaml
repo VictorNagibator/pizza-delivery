@@ -1,0 +1,985 @@
+asyncapi: '3.0.0'
+id: 'urn:com:pizza-delivery:microservices'
+info:
+  title: Pizza Delivery
+  version: '1.0.0'
+  description: |
+    Asynchronous API contract for the pizza delivery microservices.
+
+    Services communicate through RabbitMQ. Synchronous operations are described as RPC
+    (request/reply with a correlation id and reply_to), and state changes are
+    described as events in the kitchen_orders, delivery_orders, order_status
+    and order_history queues.
+  contact:
+    name: Viktor Donskoi
+  license:
+    name: MIT
+defaultContentType: application/json
+servers:
+  rabbitmq:
+    host: 'rabbitmq:5672'
+    protocol: amqp
+    protocolVersion: '0.9.1'
+    description: RabbitMQ broker. Queues are durable; messages are persistent.
+
+channels:
+  menuRpc:
+    address: menu_rpc
+    description: RPC queue of the menu service.
+    messages:
+      menuRequest:
+        $ref: '#/components/messages/MenuRequest'
+  menuReply:
+    address: menu_reply
+    description: |
+      Virtual reply channel of the menu service. The actual queue name comes in
+      the request's reply_to header; the correlation id is returned in the reply.
+    messages:
+      menuResponse:
+        $ref: '#/components/messages/MenuResponse'
+  ordersRpc:
+    address: orders_rpc
+    description: RPC queue of the orders service.
+    messages:
+      ordersRequest:
+        $ref: '#/components/messages/OrdersRequest'
+  ordersReply:
+    address: orders_reply
+    description: Virtual reply channel of the orders service.
+    messages:
+      ordersResponse:
+        $ref: '#/components/messages/OrdersResponse'
+  historyRpc:
+    address: history_rpc
+    description: RPC queue of the history service.
+    messages:
+      historyRequest:
+        $ref: '#/components/messages/HistoryRequest'
+  historyReply:
+    address: history_reply
+    description: Virtual reply channel of the history service.
+    messages:
+      historyResponse:
+        $ref: '#/components/messages/HistoryResponse'
+  kitchenRpc:
+    address: kitchen_rpc
+    description: RPC queue of the kitchen service.
+    messages:
+      kitchenRequest:
+        $ref: '#/components/messages/KitchenRequest'
+  kitchenReply:
+    address: kitchen_reply
+    description: Virtual reply channel of the kitchen service.
+    messages:
+      kitchenResponse:
+        $ref: '#/components/messages/KitchenResponse'
+  deliveryRpc:
+    address: delivery_rpc
+    description: RPC queue of the delivery service.
+    messages:
+      deliveryRequest:
+        $ref: '#/components/messages/DeliveryRequest'
+  deliveryReply:
+    address: delivery_reply
+    description: Virtual reply channel of the delivery service.
+    messages:
+      deliveryResponse:
+        $ref: '#/components/messages/DeliveryResponse'
+  kitchenOrders:
+    address: kitchen_orders
+    description: Order that must be cooked.
+    messages:
+      kitchenOrder:
+        $ref: '#/components/messages/KitchenOrder'
+  deliveryOrders:
+    address: delivery_orders
+    description: Ready order that must be delivered.
+    messages:
+      deliveryOrder:
+        $ref: '#/components/messages/DeliveryOrder'
+  orderStatus:
+    address: order_status
+    description: Order status change events from the kitchen and delivery.
+    messages:
+      orderStatus:
+        $ref: '#/components/messages/OrderStatus'
+  orderHistory:
+    address: order_history
+    description: Events for the append-only order history log.
+    messages:
+      orderHistory:
+        $ref: '#/components/messages/OrderHistory'
+
+operations:
+  requestMenu:
+    action: send
+    channel:
+      $ref: '#/channels/menuRpc'
+    summary: Gateway or Orders requests the menu or a pizza.
+    messages:
+      - $ref: '#/channels/menuRpc/messages/menuRequest'
+    reply:
+      address:
+        location: '$message.header#/replyTo'
+      channel:
+        $ref: '#/channels/menuReply'
+      messages:
+        - $ref: '#/channels/menuReply/messages/menuResponse'
+  consumeMenuRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/menuRpc'
+    summary: Menu receives an RPC request.
+    messages:
+      - $ref: '#/channels/menuRpc/messages/menuRequest'
+
+  requestOrders:
+    action: send
+    channel:
+      $ref: '#/channels/ordersRpc'
+    summary: Gateway requests order creation or reading.
+    messages:
+      - $ref: '#/channels/ordersRpc/messages/ordersRequest'
+    reply:
+      address:
+        location: '$message.header#/replyTo'
+      channel:
+        $ref: '#/channels/ordersReply'
+      messages:
+        - $ref: '#/channels/ordersReply/messages/ordersResponse'
+  consumeOrdersRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/ordersRpc'
+    summary: Orders receives an RPC request.
+    messages:
+      - $ref: '#/channels/ordersRpc/messages/ordersRequest'
+
+  requestHistory:
+    action: send
+    channel:
+      $ref: '#/channels/historyRpc'
+    summary: Gateway requests status history.
+    messages:
+      - $ref: '#/channels/historyRpc/messages/historyRequest'
+    reply:
+      address:
+        location: '$message.header#/replyTo'
+      channel:
+        $ref: '#/channels/historyReply'
+      messages:
+        - $ref: '#/channels/historyReply/messages/historyResponse'
+  consumeHistoryRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/historyRpc'
+    summary: History receives an RPC request.
+    messages:
+      - $ref: '#/channels/historyRpc/messages/historyRequest'
+
+  requestKitchen:
+    action: send
+    channel:
+      $ref: '#/channels/kitchenRpc'
+    summary: Gateway requests recipes, stock or the kitchen journal.
+    messages:
+      - $ref: '#/channels/kitchenRpc/messages/kitchenRequest'
+    reply:
+      address:
+        location: '$message.header#/replyTo'
+      channel:
+        $ref: '#/channels/kitchenReply'
+      messages:
+        - $ref: '#/channels/kitchenReply/messages/kitchenResponse'
+  consumeKitchenRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/kitchenRpc'
+    summary: Kitchen receives an RPC request.
+    messages:
+      - $ref: '#/channels/kitchenRpc/messages/kitchenRequest'
+
+  requestDelivery:
+    action: send
+    channel:
+      $ref: '#/channels/deliveryRpc'
+    summary: Gateway requests couriers, deliveries or statistics.
+    messages:
+      - $ref: '#/channels/deliveryRpc/messages/deliveryRequest'
+    reply:
+      address:
+        location: '$message.header#/replyTo'
+      channel:
+        $ref: '#/channels/deliveryReply'
+      messages:
+        - $ref: '#/channels/deliveryReply/messages/deliveryResponse'
+  consumeDeliveryRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/deliveryRpc'
+    summary: Delivery receives an RPC request.
+    messages:
+      - $ref: '#/channels/deliveryRpc/messages/deliveryRequest'
+
+  publishKitchenOrder:
+    action: send
+    channel:
+      $ref: '#/channels/kitchenOrders'
+    summary: Orders publishes a new order to the kitchen.
+    messages:
+      - $ref: '#/channels/kitchenOrders/messages/kitchenOrder'
+  consumeKitchenOrder:
+    action: receive
+    channel:
+      $ref: '#/channels/kitchenOrders'
+    summary: Kitchen receives an order to cook.
+    messages:
+      - $ref: '#/channels/kitchenOrders/messages/kitchenOrder'
+
+  publishDeliveryOrder:
+    action: send
+    channel:
+      $ref: '#/channels/deliveryOrders'
+    summary: Kitchen hands the ready order over to delivery.
+    messages:
+      - $ref: '#/channels/deliveryOrders/messages/deliveryOrder'
+  consumeDeliveryOrder:
+    action: receive
+    channel:
+      $ref: '#/channels/deliveryOrders'
+    summary: Delivery receives an order to deliver.
+    messages:
+      - $ref: '#/channels/deliveryOrders/messages/deliveryOrder'
+
+  publishOrderStatus:
+    action: send
+    channel:
+      $ref: '#/channels/orderStatus'
+    summary: Kitchen or Delivery reports a status change.
+    messages:
+      - $ref: '#/channels/orderStatus/messages/orderStatus'
+  consumeOrderStatus:
+    action: receive
+    channel:
+      $ref: '#/channels/orderStatus'
+    summary: Orders updates the current order status.
+    messages:
+      - $ref: '#/channels/orderStatus/messages/orderStatus'
+
+  publishOrderHistory:
+    action: send
+    channel:
+      $ref: '#/channels/orderHistory'
+    summary: Orders publishes an event to the history log.
+    messages:
+      - $ref: '#/channels/orderHistory/messages/orderHistory'
+  consumeOrderHistory:
+    action: receive
+    channel:
+      $ref: '#/channels/orderHistory'
+    summary: History stores the event in the append-only log.
+    messages:
+      - $ref: '#/channels/orderHistory/messages/orderHistory'
+
+components:
+  messages:
+    MenuRequest:
+      name: MenuRequest
+      title: Menu service request
+      summary: RPC request with an action and parameters.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/MenuRequestPayload'
+    MenuResponse:
+      name: MenuResponse
+      title: Menu service response
+      summary: HTTP-like response (status + body).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RpcReply'
+    OrdersRequest:
+      name: OrdersRequest
+      title: Orders service request
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrdersRequestPayload'
+    OrdersResponse:
+      name: OrdersResponse
+      title: Orders service response
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RpcReply'
+    HistoryRequest:
+      name: HistoryRequest
+      title: History service request
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/HistoryRequestPayload'
+    HistoryResponse:
+      name: HistoryResponse
+      title: History service response
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RpcReply'
+    KitchenRequest:
+      name: KitchenRequest
+      title: Kitchen service request
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/KitchenRequestPayload'
+    KitchenResponse:
+      name: KitchenResponse
+      title: Kitchen service response
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RpcReply'
+    DeliveryRequest:
+      name: DeliveryRequest
+      title: Delivery service request
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/DeliveryRequestPayload'
+    DeliveryResponse:
+      name: DeliveryResponse
+      title: Delivery service response
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RpcReply'
+    KitchenOrder:
+      name: KitchenOrder
+      title: Kitchen order
+      summary: Order that must be cooked.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/KitchenOrderPayload'
+    DeliveryOrder:
+      name: DeliveryOrder
+      title: Delivery order
+      summary: Ready order that must be delivered.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/DeliveryOrderPayload'
+    OrderStatus:
+      name: OrderStatus
+      title: Status event
+      summary: Current order status from the kitchen or delivery.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrderStatusPayload'
+    OrderHistory:
+      name: OrderHistory
+      title: History event
+      summary: Record for the append-only status log.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrderHistoryPayload'
+
+  schemas:
+    RpcEnvelope:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          description: Action name inside the service.
+        payload:
+          type: object
+          additionalProperties: true
+          description: Action parameters.
+      additionalProperties: false
+
+    RpcReply:
+      type: object
+      required: [status, body]
+      properties:
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        body:
+          description: Response body; the format depends on the action.
+      additionalProperties: false
+
+    MenuRequestPayload:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum: [menu, get_pizza, search_menu, add_pizza, update_price]
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    OrdersRequestPayload:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum:
+            - create_order
+            - list_orders
+            - get_order
+            - list_orders_by_status
+            - get_order_stats
+            - cancel_order
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    HistoryRequestPayload:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum:
+            - get_history
+            - get_latest_status
+            - list_events
+            - get_history_stats
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    KitchenRequestPayload:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum:
+            - recipes
+            - recipe
+            - stock
+            - check_availability
+            - restock
+            - set_stock
+            - orders
+            - order
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    DeliveryRequestPayload:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum:
+            - couriers
+            - courier
+            - register_courier
+            - deliveries
+            - delivery
+            - delivery_stats
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    MenuItem:
+      type: object
+      required: [code, name, price]
+      properties:
+        code:
+          type: string
+          example: pepperoni
+        name:
+          type: string
+          example: Pepperoni
+        price:
+          type: number
+          minimum: 0
+          example: 550
+      additionalProperties: false
+
+    Menu:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MenuItem'
+
+    Order:
+      type: object
+      required: [id, pizza, pizza_name, address, quantity, total_price, status, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+        pizza:
+          type: string
+        pizza_name:
+          type: string
+        address:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        total_price:
+          type: number
+        status:
+          type: string
+          enum:
+            - new
+            - cooking
+            - ready
+            - delivering
+            - delivered
+            - rejected
+            - delivery_queued
+            - publish_failed
+            - cancelled
+        courier:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    OrderStats:
+      type: object
+      required: [total_orders, total_revenue, average_order_value, by_status]
+      properties:
+        total_orders:
+          type: integer
+        total_revenue:
+          type: number
+        average_order_value:
+          type: number
+        by_status:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              count:
+                type: integer
+              revenue:
+                type: number
+
+    HistoryEntry:
+      type: object
+      required: [status, created_at]
+      properties:
+        status:
+          type: string
+        courier:
+          type: string
+        reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    HistoryStats:
+      type: object
+      required: [total_events, total_orders, by_status]
+      properties:
+        total_events:
+          type: integer
+        total_orders:
+          type: integer
+        by_status:
+          type: object
+          additionalProperties:
+            type: integer
+
+    Recipe:
+      type: object
+      required: [code, name, cook_time]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        cook_time:
+          type: integer
+          minimum: 0
+
+    Ingredient:
+      type: object
+      required: [name, unit, stock]
+      properties:
+        name:
+          type: string
+        unit:
+          type: string
+        stock:
+          type: number
+          minimum: 0
+
+    Availability:
+      type: object
+      required: [pizza, pizza_name, quantity, available, missing, ingredients]
+      properties:
+        pizza:
+          type: string
+        pizza_name:
+          type: string
+        quantity:
+          type: integer
+        available:
+          type: boolean
+        missing:
+          type: array
+          items:
+            type: string
+        ingredients:
+          type: array
+          items:
+            type: object
+            properties:
+              ingredient:
+                type: string
+              unit:
+                type: string
+              per_pizza:
+                type: number
+              required:
+                type: number
+              stock:
+                type: number
+
+    KitchenOrderPayload:
+      type: object
+      required: [order_id, pizza, quantity]
+      properties:
+        order_id:
+          type: integer
+        pizza:
+          type: string
+        pizza_name:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        address:
+          type: string
+
+    KitchenJournalEntry:
+      type: object
+      properties:
+        order_id:
+          type: integer
+        pizza:
+          type: string
+        quantity:
+          type: integer
+        status:
+          type: string
+        reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    DeliveryOrderPayload:
+      type: object
+      required: [order_id, address]
+      properties:
+        order_id:
+          type: integer
+        pizza:
+          type: string
+        pizza_name:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        address:
+          type: string
+
+    OrderStatusPayload:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id:
+          type: integer
+        status:
+          type: string
+          enum:
+            - new
+            - cooking
+            - ready
+            - delivering
+            - delivered
+            - rejected
+            - delivery_queued
+            - cancelled
+        courier:
+          type: string
+        reason:
+          type: string
+
+    OrderHistoryPayload:
+      type: object
+      required: [order_id, status]
+      properties:
+        order_id:
+          type: integer
+        status:
+          type: string
+        courier:
+          type: string
+        reason:
+          type: string
+        event_id:
+          type: string
+          description: Idempotency key; defaults to order_id:status.
+        created_at:
+          type: string
+          format: date-time
+
+    Courier:
+      type: object
+      required: [id, name, phone, status, deliveries_count]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+        status:
+          type: string
+          enum: [free, busy]
+        deliveries_count:
+          type: integer
+          minimum: 0
+
+    Delivery:
+      type: object
+      properties:
+        id:
+          type: integer
+        order_id:
+          type: integer
+        courier_id:
+          type: integer
+        courier_name:
+          type: string
+        address:
+          type: string
+        status:
+          type: string
+          enum: [queued, delivering, delivered]
+        created_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type: string
+          format: date-time
+
+    DeliveryStats:
+      type: object
+      properties:
+        total_deliveries:
+          type: integer
+        by_status:
+          type: object
+          additionalProperties:
+            type: integer
+        couriers:
+          type: object
+          properties:
+            total:
+              type: integer
+            free:
+              type: integer
+            busy:
+              type: integer
+
+x-services:
+  gateway:
+    description: HTTP API and RPC client.
+    operations:
+      - $ref: '#/operations/requestMenu'
+      - $ref: '#/operations/requestOrders'
+      - $ref: '#/operations/requestHistory'
+      - $ref: '#/operations/requestKitchen'
+      - $ref: '#/operations/requestDelivery'
+  menu:
+    description: Pizza catalog and prices.
+    operations:
+      - $ref: '#/operations/consumeMenuRequest'
+  orders:
+    description: Orders, pricing and current status.
+    operations:
+      - $ref: '#/operations/requestMenu'
+      - $ref: '#/operations/consumeOrdersRequest'
+      - $ref: '#/operations/publishKitchenOrder'
+      - $ref: '#/operations/consumeOrderStatus'
+      - $ref: '#/operations/publishOrderHistory'
+  history:
+    description: Append-only status log.
+    operations:
+      - $ref: '#/operations/consumeHistoryRequest'
+      - $ref: '#/operations/consumeOrderHistory'
+  kitchen:
+    description: Recipes, stock and cooking.
+    operations:
+      - $ref: '#/operations/consumeKitchenRequest'
+      - $ref: '#/operations/consumeKitchenOrder'
+      - $ref: '#/operations/publishDeliveryOrder'
+      - $ref: '#/operations/publishOrderStatus'
+  delivery:
+    description: Couriers and delivery assignment.
+    operations:
+      - $ref: '#/operations/consumeDeliveryRequest'
+      - $ref: '#/operations/consumeDeliveryOrder'
+      - $ref: '#/operations/publishOrderStatus'
+
+x-rpc-actions:
+  menu:
+    menu:
+      description: Return the menu.
+      response: Menu
+    get_pizza:
+      description: Return one pizza by code or name.
+      request: {pizza: string}
+      response: MenuItem
+    search_menu:
+      description: Search by name and price range.
+      request: {q: string, min_price: number, max_price: number}
+      response: array of MenuItem
+    add_pizza:
+      description: Add a pizza to the menu.
+      request: {code: string, name: string, price: number}
+      response: MenuItem
+    update_price:
+      description: Change a pizza price.
+      request: {code: string, price: number}
+      response: MenuItem
+  orders:
+    create_order:
+      description: Create an order and calculate its price.
+      request: {pizza: string, address: string, quantity: integer}
+      response: Order
+    list_orders:
+      description: List orders.
+      response: array of Order
+    get_order:
+      description: One order by id.
+      request: {order_id: integer}
+      response: Order
+    list_orders_by_status:
+      description: Orders with a given status.
+      request: {status: string}
+      response: array of Order
+    get_order_stats:
+      description: Aggregated order statistics.
+      response: OrderStats
+    cancel_order:
+      description: Cancel an order if it is not in a final state.
+      request: {order_id: integer}
+      response: Order
+  history:
+    get_history:
+      description: Full order status history.
+      request: {order_id: integer}
+      response: array of HistoryEntry
+    get_latest_status:
+      description: Latest order status.
+      request: {order_id: integer}
+      response: HistoryEntry
+    list_events:
+      description: Recent events with filtering and pagination.
+      request: {limit: integer, offset: integer, status: string}
+      response: array of HistoryEntry
+    get_history_stats:
+      description: Status log statistics.
+      response: HistoryStats
+  kitchen:
+    recipes:
+      description: List recipes.
+      response: array of Recipe
+    recipe:
+      description: One recipe.
+      request: {code: string}
+      response: Recipe
+    stock:
+      description: Ingredient stock.
+      response: array of Ingredient
+    check_availability:
+      description: Check whether a pizza can be cooked.
+      request: {pizza: string, quantity: integer}
+      response: Availability
+    restock:
+      description: Restock an ingredient.
+      request: {ingredient: string, amount: number}
+      response: Ingredient
+    set_stock:
+      description: Set the exact ingredient stock.
+      request: {ingredient: string, amount: number}
+      response: Ingredient
+    orders:
+      description: Kitchen order journal.
+      request: {limit: integer}
+      response: array of KitchenJournalEntry
+    order:
+      description: Kitchen journal record by order id.
+      request: {order_id: integer}
+      response: KitchenJournalEntry
+  delivery:
+    couriers:
+      description: List couriers.
+      response: array of Courier
+    courier:
+      description: One courier.
+      request: {courier_id: integer}
+      response: Courier
+    register_courier:
+      description: Register a courier.
+      request: {name: string, phone: string}
+      response: Courier
+    deliveries:
+      description: Recent deliveries.
+      request: {limit: integer}
+      response: array of Delivery
+    delivery:
+      description: Delivery by order id.
+      request: {order_id: integer}
+      response: Delivery
+    delivery_stats:
+      description: Delivery and courier statistics.
+      response: DeliveryStats
+
+x-http-routes:
+  - {method: GET, path: /menu, operation: requestMenu, action: menu}
+  - {method: GET, path: /menu/search, operation: requestMenu, action: search_menu}
+  - {method: POST, path: /menu, operation: requestMenu, action: add_pizza}
+  - {method: PATCH, path: '/menu/{code}/price', operation: requestMenu, action: update_price}
+  - {method: POST, path: /order, operation: requestOrders, action: create_order}
+  - {method: GET, path: /orders, operation: requestOrders, action: list_orders}
+  - {method: GET, path: /orders/stats, operation: requestOrders, action: get_order_stats}
+  - {method: GET, path: '/orders/status/{status}', operation: requestOrders, action: list_orders_by_status}
+  - {method: GET, path: '/orders/{order_id}', operation: requestOrders, action: get_order}
+  - {method: POST, path: '/orders/{order_id}/cancel', operation: requestOrders, action: cancel_order}
+  - {method: GET, path: '/orders/{order_id}/history', operation: requestHistory, action: get_history}
+  - {method: GET, path: '/orders/{order_id}/history/latest', operation: requestHistory, action: get_latest_status}
+  - {method: GET, path: /history/events, operation: requestHistory, action: list_events}
+  - {method: GET, path: /history/stats, operation: requestHistory, action: get_history_stats}
+  - {method: GET, path: /kitchen/recipes, operation: requestKitchen, action: recipes}
+  - {method: GET, path: '/kitchen/recipes/{code}', operation: requestKitchen, action: recipe}
+  - {method: GET, path: /kitchen/stock, operation: requestKitchen, action: stock}
+  - {method: POST, path: '/kitchen/stock/{ingredient}/restock', operation: requestKitchen, action: restock}
+  - {method: PUT, path: '/kitchen/stock/{ingredient}', operation: requestKitchen, action: set_stock}
+  - {method: POST, path: /kitchen/availability, operation: requestKitchen, action: check_availability}
+  - {method: GET, path: /kitchen/orders, operation: requestKitchen, action: orders}
+  - {method: GET, path: '/kitchen/orders/{order_id}', operation: requestKitchen, action: order}
+  - {method: GET, path: /delivery/couriers, operation: requestDelivery, action: couriers}
+  - {method: POST, path: /delivery/couriers, operation: requestDelivery, action: register_courier}
+  - {method: GET, path: '/delivery/couriers/{courier_id}', operation: requestDelivery, action: courier}
+  - {method: GET, path: /delivery/deliveries, operation: requestDelivery, action: deliveries}
+  - {method: GET, path: '/delivery/deliveries/{order_id}', operation: requestDelivery, action: delivery}
+  - {method: GET, path: /delivery/stats, operation: requestDelivery, action: delivery_stats}

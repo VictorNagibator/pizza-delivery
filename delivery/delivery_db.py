@@ -105,8 +105,39 @@ def get_delivery_by_order(order_id, path=None):
     return dict(row) if row else None
 
 
-# Returns all deliveries, newest first
-def list_deliveries(path=None):
+# Returns deliveries, newest first
+def list_deliveries(path=None, limit=50):
     with get_connection(path) as connection:
-        rows = connection.execute('SELECT * FROM deliveries ORDER BY id DESC').fetchall()
+        rows = connection.execute(
+            'SELECT * FROM deliveries ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
     return [dict(row) for row in rows]
+
+
+# Returns aggregate delivery statistics
+def get_stats(path=None):
+    with get_connection(path) as connection:
+        delivery_rows = connection.execute('''
+            SELECT status, COUNT(*) AS count
+            FROM deliveries
+            GROUP BY status
+            ORDER BY status
+        ''').fetchall()
+        courier_rows = connection.execute('''
+            SELECT status, COUNT(*) AS count
+            FROM couriers
+            GROUP BY status
+            ORDER BY status
+        ''').fetchall()
+        total = connection.execute(
+            'SELECT COUNT(*) AS count FROM deliveries').fetchone()['count']
+
+    couriers = {row['status']: row['count'] for row in courier_rows}
+    return {
+        'total_deliveries': total,
+        'by_status': {row['status']: row['count'] for row in delivery_rows},
+        'couriers': {
+            'total': sum(couriers.values()),
+            'free': couriers.get('free', 0),
+            'busy': couriers.get('busy', 0),
+        },
+    }

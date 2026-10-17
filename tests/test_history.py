@@ -8,9 +8,17 @@ class FakeChannel:
     def __init__(self):
         self.published = []
         self.acked = []
+        self.exchanges = []
+        self.bindings = []
+
+    def exchange_declare(self, exchange, exchange_type, durable=False):
+        self.exchanges.append((exchange, exchange_type, durable))
 
     def queue_declare(self, queue, durable=False):
         pass
+
+    def queue_bind(self, queue, exchange, routing_key):
+        self.bindings.append((queue, exchange, routing_key))
 
     def basic_publish(self, exchange, routing_key, body, properties=None):
         self.published.append({'routing_key': routing_key, 'body': json.loads(body)})
@@ -88,3 +96,86 @@ def test_event_consumer(history_module):
     assert entries[0]['status'] == 'rejected'
     assert entries[0]['reason'] == 'Out of ingredients'
     assert channel.acked == [7]
+
+
+# 11. The consumer declares its topic-exchange binding itself
+def test_declares_topic_binding(history_module):
+    channel = FakeChannel()
+
+    history_module.declare_topology(channel)
+
+    assert channel.exchanges == [('amq.topic', 'topic', True)]
+    assert ('order_history', 'amq.topic', 'order_history') in channel.bindings
+
+
+
+# 7. The latest status is returned separately from the full history
+def test_latest_status(history):
+    history.record({'order_id': 20, 'status': 'new'})
+    history.record({'order_id': 20, 'status': 'cooking', 'courier': None})
+
+    latest = history.get_latest_status(20)
+    assert latest['status'] == 'cooking'
+
+    assert history.get_latest_status(999) is None
+
+
+# 8. Recent events can be filtered and paginated
+def test_list_events(history):
+    history.record({'order_id': 21, 'status': 'new'})
+    history.record({'order_id': 21, 'status': 'cooking'})
+    history.record({'order_id': 22, 'status': 'new'})
+    history.record({'order_id': 22, 'status': 'rejected', 'reason': 'No dough'})
+
+    events = history.list_events(limit=2)
+    assert len(events) == 2
+    assert events[0]['order_id'] == 22
+
+    rejected = history.list_events(status='rejected')
+    assert len(rejected) == 1
+    assert rejected[0]['reason'] == 'No dough'
+
+    page = history.list_events(limit=1, offset=1)
+    assert len(page) == 1
+    assert page[0]['order_id'] == 22
+    assert page[0]['status'] == 'new'
+
+
+# 9. Statistics aggregate events and unique orders
+def test_stats(history):
+    history.record({'order_id': 30, 'status': 'new'})
+    history.record({'order_id': 30, 'status': 'delivered'})
+    history.record({'order_id': 31, 'status': 'new'})
+
+    stats = history.get_stats()
+    assert stats['total_events'] == 3
+    assert stats['total_orders'] == 2
+    assert stats['by_status'] == {'delivered': 1, 'new': 2}
+
+
+# 10. The RPC handler exposes latest status, recent events and statistics
+def test_rpc_handler_extended(history_module):
+    history_module.history.record({'order_id': 40, 'status': 'new'})
+    history_module.history.record({'order_id': 40, 'status': 'cooking'})
+
+    status, body = history_module.handle_request({
+        'action': 'get_latest_status', 'payload': {'order_id': 40}})
+    assert status == 200
+    assert body['status'] == 'cooking'
+
+    status, _ = history_module.handle_request({
+        'action': 'get_latest_status', 'payload': {'order_id': 404}})
+    assert status == 404
+
+    status, body = history_module.handle_request({
+        'action': 'list_events', 'payload': {'limit': 1}})
+    assert status == 200
+    assert len(body) == 1
+
+    status, _ = history_module.handle_request({
+        'action': 'list_events', 'payload': {'limit': 0}})
+    assert status == 400
+
+    status, body = history_module.handle_request({'action': 'get_history_stats'})
+    assert status == 200
+    assert body['total_orders'] == 1

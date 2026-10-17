@@ -24,6 +24,8 @@ services:
       MENU_RPC_QUEUE: menu_rpc
       ORDERS_RPC_QUEUE: orders_rpc
       HISTORY_RPC_QUEUE: history_rpc
+      KITCHEN_RPC_QUEUE: kitchen_rpc
+      DELIVERY_RPC_QUEUE: delivery_rpc
     depends_on:
       rabbitmq:
         condition: service_healthy

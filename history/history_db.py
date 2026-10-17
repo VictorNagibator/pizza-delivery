@@ -74,3 +74,55 @@ def get_history(order_id, path=None):
             ORDER BY id
         ''', (order_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+# Returns the last status event of an order or None
+def get_latest_status(order_id, path=None):
+    with get_connection(path) as connection:
+        row = connection.execute('''
+            SELECT status, courier, reason, created_at
+            FROM order_status_history
+            WHERE order_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        ''', (order_id,)).fetchone()
+    return dict(row) if row else None
+
+
+# Returns recent events, optionally filtered by status
+def list_events(limit=50, offset=0, status=None, path=None):
+    sql = '''
+        SELECT order_id, status, courier, reason, created_at
+        FROM order_status_history
+    '''
+    params = []
+    if status is not None:
+        sql += ' WHERE status = ?'
+        params.append(status)
+    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?'
+    params.extend([limit, offset])
+
+    with get_connection(path) as connection:
+        rows = connection.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+# Returns aggregate statistics for the status log
+def get_stats(path=None):
+    with get_connection(path) as connection:
+        rows = connection.execute('''
+            SELECT status, COUNT(*) AS count
+            FROM order_status_history
+            GROUP BY status
+            ORDER BY status
+        ''').fetchall()
+        totals = connection.execute('''
+            SELECT COUNT(*) AS total_events, COUNT(DISTINCT order_id) AS total_orders
+            FROM order_status_history
+        ''').fetchone()
+
+    return {
+        'total_events': totals['total_events'],
+        'total_orders': totals['total_orders'],
+        'by_status': {row['status']: row['count'] for row in rows},
+    }

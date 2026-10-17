@@ -189,3 +189,55 @@ def test_orders_rpc_creates_order(rpc_server, gateway, channel):
     event = json.loads(history_body)
     assert event['order_id'] == response['body']['order_id']
     assert event['status'] == 'new'
+
+
+@pytest.fixture
+def kitchen_rpc_server(kitchen_module):
+    queue = f'kitchen_rpc_test_{uuid.uuid4().hex}'
+    server = RpcServer(queue, kitchen_module.on_request)
+    server.start()
+    assert server.ready.wait(timeout=5)
+    yield server, queue
+    server.stop()
+
+
+@pytest.fixture
+def delivery_rpc_server(delivery_module):
+    queue = f'delivery_rpc_test_{uuid.uuid4().hex}'
+    server = RpcServer(queue, delivery_module.on_request)
+    server.start()
+    assert server.ready.wait(timeout=5)
+    yield server, queue
+    server.stop()
+
+
+# The kitchen RPC handler answers over a real broker
+def test_kitchen_rpc(kitchen_rpc_server, gateway):
+    _, queue = kitchen_rpc_server
+
+    response = gateway.rpc.call(queue, {'action': 'recipes', 'payload': None})
+    assert response['status'] == 200
+    assert any(recipe['code'] == 'pepperoni' for recipe in response['body'])
+
+    response = gateway.rpc.call(queue, {
+        'action': 'check_availability',
+        'payload': {'pizza': 'pepperoni', 'quantity': 1},
+    })
+    assert response['status'] == 200
+    assert response['body']['available'] is True
+
+
+# The delivery RPC handler answers over a real broker
+def test_delivery_rpc(delivery_rpc_server, gateway):
+    _, queue = delivery_rpc_server
+
+    response = gateway.rpc.call(queue, {'action': 'couriers', 'payload': None})
+    assert response['status'] == 200
+
+    name = f'Courier {uuid.uuid4().hex[:8]}'
+    response = gateway.rpc.call(queue, {
+        'action': 'register_courier',
+        'payload': {'name': name, 'phone': '+7-900-000-04-01'},
+    })
+    assert response['status'] == 201
+    assert response['body']['name'] == name

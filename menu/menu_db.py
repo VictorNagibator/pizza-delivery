@@ -66,3 +66,46 @@ def get_pizza(code, path=None):
     with get_connection(path) as connection:
         row = connection.execute('SELECT code, name, price FROM menu WHERE code = ?', (code,)).fetchone()
     return dict(row) if row else None
+
+
+# Adds a new pizza. Returns False when the code already exists.
+def add_pizza(code, name, price, path=None):
+    with get_connection(path) as connection:
+        cursor = connection.execute(
+            'INSERT OR IGNORE INTO menu (code, name, price) VALUES (?, ?, ?)',
+            (code, name, price))
+        return cursor.rowcount > 0
+
+
+# Changes the price of an existing pizza. Returns False when it is not found.
+def update_price(code, price, path=None):
+    with get_connection(path) as connection:
+        cursor = connection.execute(
+            'UPDATE menu SET price = ? WHERE code = ?', (price, code))
+        return cursor.rowcount > 0
+
+
+# Searches the menu by name/code and optional price range
+def search_menu(query=None, min_price=None, max_price=None, path=None):
+    sql = 'SELECT code, name, price FROM menu'
+    clauses = []
+    params = []
+
+    if query:
+        like = f'%{query}%'
+        clauses.append('(code LIKE ? OR name LIKE ?)')
+        params.extend([like, like])
+    if min_price is not None:
+        clauses.append('price >= ?')
+        params.append(min_price)
+    if max_price is not None:
+        clauses.append('price <= ?')
+        params.append(max_price)
+
+    if clauses:
+        sql += ' WHERE ' + ' AND '.join(clauses)
+    sql += ' ORDER BY code'
+
+    with get_connection(path) as connection:
+        rows = connection.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]

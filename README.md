@@ -71,9 +71,13 @@ changes travel as events.
    reaches the History service directly over `history_rpc`.
 
 Statuses: `new` -> `cooking` -> `ready` -> `delivering` -> `delivered`.
-A rejected order becomes `rejected`; if all couriers are busy an order can also
-become `delivery_queued` (waiting for a free courier). If the order cannot be
-published to Kitchen, it is stored with status `publish_failed`.
+A rejected order becomes `rejected`; a non-final order can be cancelled
+(`cancelled`); if all couriers are busy an order can also become
+`delivery_queued` (waiting for a free courier). If the order cannot be published
+to Kitchen, it is stored with status `publish_failed`.
+
+Cancellation updates the order state and the history log. It is best effort: a
+cooking or delivery process that has already started is not interrupted.
 
 ## Internal queues
 
@@ -82,6 +86,8 @@ published to Kitchen, it is stored with status `publish_failed`.
 | `menu_rpc`        | Gateway, Orders          | Menu      | RPC   | menu and one pizza lookup       |
 | `orders_rpc`      | Gateway                  | Orders    | RPC   | create/read orders              |
 | `history_rpc`     | Gateway                  | History   | RPC   | read status history             |
+| `kitchen_rpc`     | Gateway                  | Kitchen   | RPC   | recipes, stock and journal      |
+| `delivery_rpc`    | Gateway                  | Delivery  | RPC   | couriers and deliveries         |
 | `kitchen_orders`  | Orders                   | Kitchen   | async | start cooking                   |
 | `delivery_orders` | Kitchen                  | Delivery  | async | assign a courier                |
 | `order_status`    | Kitchen, Delivery        | Orders    | async | status change of the order      |
@@ -93,6 +99,7 @@ published to Kitchen, it is stored with status `publish_failed`.
 * Pika (RabbitMQ client, AMQP RPC)
 * RabbitMQ 4.0
 * SQLite (per-service storage)
+* AsyncAPI 3.0 (contract in `contracts/`)
 * Docker Compose
 
 The Gateway uses Flask; the backend services are plain Python consumers.
@@ -102,6 +109,9 @@ The Gateway uses Flask; the backend services are plain Python consumers.
 ```text
 pizza-delivery/
 ├── docker-compose.yaml
+├── contracts/
+│   ├── asyncapi.yaml           # AsyncAPI 3.0 contract for all services
+│   └── README.md               # contract structure and code generation
 ├── gateway/
 │   ├── app.py                  # thin HTTP API, calls all backend queues
 │   └── rpc_client.py           # synchronous AMQP RPC client
@@ -120,12 +130,12 @@ pizza-delivery/
 │   ├── history_logic.py        # status log logic
 │   └── history_db.py           # order_status_history table
 ├── kitchen/
-│   ├── app.py                  # kitchen_orders consumer
-│   ├── kitchen_logic.py        # cooking logic
+│   ├── app.py                  # kitchen_rpc and kitchen_orders consumer
+│   ├── kitchen_logic.py        # cooking and availability logic
 │   └── kitchen_db.py           # recipes, ingredients, kitchen journal
 ├── delivery/
-│   ├── app.py                  # delivery_orders consumer
-│   ├── delivery_logic.py       # courier assignment
+│   ├── app.py                  # delivery_rpc and delivery_orders consumer
+│   ├── delivery_logic.py       # courier assignment and statistics
 │   └── delivery_db.py          # couriers and deliveries
 ├── tests/
 └── requirements-test.txt
@@ -173,13 +183,58 @@ docker compose down -v
 
 The Gateway routes each HTTP endpoint to the service that owns the data.
 
-| Method | Path                    | Backend queue  | Description                       |
-|--------|-------------------------|----------------|-----------------------------------|
-| GET    | `/menu`                 | `menu_rpc`     | pizza menu and prices             |
-| POST   | `/order`                | `orders_rpc`   | create an order                   |
-| GET    | `/orders`               | `orders_rpc`   | list all orders                   |
-| GET    | `/orders/<id>`          | `orders_rpc`   | one order with status and courier |
-| GET    | `/orders/<id>/history`  | `history_rpc`  | full status history of an order   |
+### Menu
+
+| Method | Path                           | Backend queue | Description                    |
+|--------|--------------------------------|---------------|--------------------------------|
+| GET    | `/menu`                        | `menu_rpc`    | pizza menu and prices          |
+| GET    | `/menu/search?q=&min_price=&max_price=` | `menu_rpc` | filter the menu         |
+| POST   | `/menu`                        | `menu_rpc`    | add a pizza                    |
+| PATCH  | `/menu/<code>/price`           | `menu_rpc`    | change a pizza price           |
+
+### Orders
+
+| Method | Path                           | Backend queue | Description                    |
+|--------|--------------------------------|---------------|--------------------------------|
+| POST   | `/order`                       | `orders_rpc`  | create an order                |
+| GET    | `/orders`                      | `orders_rpc`  | list all orders                |
+| GET    | `/orders/stats`                | `orders_rpc`  | order counts and revenue       |
+| GET    | `/orders/status/<status>`      | `orders_rpc`  | orders with one status         |
+| GET    | `/orders/<id>`                 | `orders_rpc`  | one order with status/courier  |
+| POST   | `/orders/<id>/cancel`          | `orders_rpc`  | cancel a non-final order       |
+
+### History
+
+| Method | Path                              | Backend queue | Description                  |
+|--------|-----------------------------------|---------------|------------------------------|
+| GET    | `/orders/<id>/history`            | `history_rpc` | full status history          |
+| GET    | `/orders/<id>/history/latest`     | `history_rpc` | latest status event          |
+| GET    | `/history/events?limit=&offset=&status=` | `history_rpc` | recent events    |
+| GET    | `/history/stats`                  | `history_rpc` | status log statistics        |
+
+### Kitchen
+
+| Method | Path                                  | Backend queue  | Description              |
+|--------|---------------------------------------|----------------|--------------------------|
+| GET    | `/kitchen/recipes`                    | `kitchen_rpc`  | recipes                  |
+| GET    | `/kitchen/recipes/<code>`             | `kitchen_rpc`  | one recipe               |
+| GET    | `/kitchen/stock`                      | `kitchen_rpc`  | ingredient stock         |
+| POST   | `/kitchen/availability`               | `kitchen_rpc`  | check if a pizza is available |
+| POST   | `/kitchen/stock/<ingredient>/restock` | `kitchen_rpc`  | add stock                |
+| PUT    | `/kitchen/stock/<ingredient>`         | `kitchen_rpc`  | set exact stock          |
+| GET    | `/kitchen/orders`                     | `kitchen_rpc`  | kitchen journal          |
+| GET    | `/kitchen/orders/<id>`                | `kitchen_rpc`  | one kitchen journal row  |
+
+### Delivery
+
+| Method | Path                              | Backend queue  | Description              |
+|--------|-----------------------------------|----------------|--------------------------|
+| GET    | `/delivery/couriers`              | `delivery_rpc` | couriers                 |
+| POST   | `/delivery/couriers`              | `delivery_rpc` | register a courier       |
+| GET    | `/delivery/couriers/<id>`         | `delivery_rpc` | one courier              |
+| GET    | `/delivery/deliveries`            | `delivery_rpc` | recent deliveries        |
+| GET    | `/delivery/deliveries/<order_id>` | `delivery_rpc` | delivery for an order    |
+| GET    | `/delivery/stats`                 | `delivery_rpc` | delivery statistics      |
 
 ### POST /order
 
@@ -213,9 +268,8 @@ Errors:
 * `400` — missing/unknown pizza, empty address or invalid quantity;
 * `500` — the message broker is unavailable (order is stored with status
   `publish_failed`);
-* `503` — a required service did not answer: `Menu service is unavailable` when
-  the price cannot be requested, or `Orders service is unavailable` /
-  `History service is unavailable` at the Gateway.
+* `503` — a required service did not answer: `Menu`, `Orders`, `History`,
+  `Kitchen` or `Delivery service is unavailable` at the Gateway.
 
 Pricing rules: 10% discount from 3 pizzas, delivery costs 100 and is free from
 1000. Pricing belongs to the Orders service, while the unit price comes from the
@@ -276,6 +330,19 @@ Because the Gateway calls services by queue name, adding a service means:
 For example, an `auth` service would consume `auth_rpc` and the Gateway would add
 `/auth/login`, without changing Orders, Menu or History.
 
+## AsyncAPI contract
+
+The asynchronous API is described in [contracts/asyncapi.yaml](contracts/asyncapi.yaml)
+(AsyncAPI 3.0). It contains 14 channels and 18 operations: the five RPC queues,
+the `kitchen_orders`, `delivery_orders`, `order_status` and `order_history`
+events, message schemas, the `x-services` map, action-level payload descriptions
+and the HTTP routes exposed by the Gateway.
+
+The contract is used for documentation and code generation. With AsyncAPI
+Generator 1.17 and `@asyncapi/nodejs-template` a Node.js client was generated and
+run against RabbitMQ; it published an `order_history` event that was stored by the
+History service. The exact steps are in [contracts/README.md](contracts/README.md).
+
 ## Tests
 
 Unit tests run without RabbitMQ. They use temporary SQLite databases and never
@@ -291,12 +358,16 @@ pytest tests -v
 
 Coverage:
 
-* `tests/test_gateway.py` — routing to Menu/Orders/History and 503 handling;
-* `tests/test_menu.py` — seed, lookup and RPC actions of the Menu service;
-* `tests/test_orders.py` — pricing, order storage, history events, menu failures;
-* `tests/test_history.py` — status log, idempotency and RPC actions;
-* `tests/test_kitchen.py` — cooking, stock consumption and rejections;
-* `tests/test_delivery.py` — courier assignment, queueing and completion.
+* `tests/test_gateway.py` — routing to all five backend queues and 503 handling;
+* `tests/test_menu.py` — seed, lookup, search, add/update price and RPC actions;
+* `tests/test_orders.py` — pricing, cancellation, status filter, statistics and
+  history events;
+* `tests/test_history.py` — full/latest history, event pagination, statistics and
+  idempotency;
+* `tests/test_kitchen.py` — cooking, availability, stock management, journal and
+  rejections;
+* `tests/test_delivery.py` — courier assignment, registration, deliveries,
+  queueing, statistics and completion.
 
 Integration tests talk to a real RabbitMQ broker. They are skipped when the broker
 is unavailable. To run only those, start the broker (without the services, so they
@@ -307,6 +378,6 @@ docker compose up -d rabbitmq
 pytest tests/test_amqp_integration.py -v
 ```
 
-`tests/test_amqp_integration.py` covers the kitchen flow, a Menu RPC round-trip
-and a full order creation with a real Menu RPC call, a Kitchen message and a
-History event.
+`tests/test_amqp_integration.py` covers the kitchen flow, Menu/Kitchen/Delivery
+RPC round-trips and a full order creation with a real Menu RPC call, a Kitchen
+message and a History event.

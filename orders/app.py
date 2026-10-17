@@ -3,7 +3,7 @@ import json
 import pika
 
 from menu_client import MenuClient, MenuUnavailable
-from order_logic import OrderService
+from order_logic import FINAL_STATUSES, OrderService
 
 # RabbitMQ address comes from the environment
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
@@ -46,10 +46,29 @@ def handle_request(request):
     if action == 'list_orders':
         return 200, service.list_orders()
 
+    if action == 'list_orders_by_status':
+        try:
+            orders = service.list_orders_by_status(payload.get('status'))
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 200, orders
+
+    if action == 'get_order_stats':
+        return 200, service.get_order_stats()
+
     if action == 'get_order':
         order = service.get_order(payload.get('order_id'))
         if order is None:
             return 404, {'error': 'Order not found'}
+        return 200, order
+
+    if action == 'cancel_order':
+        try:
+            order = service.cancel_order(payload.get('order_id'))
+        except KeyError:
+            return 404, {'error': 'Order not found'}
+        except ValueError as error:
+            return 409, {'error': str(error)}
         return 200, order
 
     return 404, {'error': f'Unknown action: {action}'}
@@ -96,6 +115,15 @@ def on_request(ch, method, props, body):
             status = 500
             response_body = {'error': str(error), 'order_id': order_id}
 
+    # Cancellation is an order-status event as well
+    if request.get('action') == 'cancel_order' and status == 200:
+        order_id = response_body['id']
+        try:
+            publish_history(ch, order_id, 'cancelled')
+        except Exception as error:
+            status = 500
+            response_body = {'error': str(error), 'order_id': order_id}
+
     reply = {'status': status, 'body': response_body}
     ch.basic_publish(
         exchange='',
@@ -112,23 +140,31 @@ def on_status(ch, method, properties, body):
         update = json.loads(body)
         order_id = update['order_id']
         status = update['status']
-        updated = service.update_status(order_id, status, update.get('courier'))
+        current = service.get_order(order_id)
     except Exception as error:
         print(f' [Orders] Failed to process status event: {error}', flush=True)
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
 
-    if not updated:
+    if current is None:
         print(f' [Orders] Order #{order_id} not found', flush=True)
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
 
+    # Do not overwrite a final state (for example, a cancelled order)
+    if current['status'] in FINAL_STATUSES:
+        print(f' [Orders] Order #{order_id} is final ({current["status"]}), '
+              f'ignoring "{status}"', flush=True)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        return
+
     try:
+        service.update_status(order_id, status, update.get('courier'))
         publish_history(ch, order_id, status, update.get('courier'), update.get('reason'))
         print(f' [Orders] Order #{order_id} -> {status}', flush=True)
     except Exception as error:
-        # The order state is already updated; only the audit event was lost.
-        print(f' [Orders] Order #{order_id} updated, history publish failed: {error}', flush=True)
+        # The order state may already be updated; only the audit event was lost.
+        print(f' [Orders] Order #{order_id} status handling failed: {error}', flush=True)
     finally:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 

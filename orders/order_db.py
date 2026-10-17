@@ -66,11 +66,43 @@ def get_order(order_id, path=None):
     return dict(row) if row else None
 
 
-# Returns all orders, newest first
-def list_orders(path=None):
+# Returns all orders, newest first. Optionally filters by status.
+def list_orders(path=None, status=None):
     with get_connection(path) as connection:
-        rows = connection.execute('SELECT * FROM orders ORDER BY id DESC').fetchall()
+        if status is None:
+            rows = connection.execute('SELECT * FROM orders ORDER BY id DESC').fetchall()
+        else:
+            rows = connection.execute(
+                'SELECT * FROM orders WHERE status = ? ORDER BY id DESC', (status,)).fetchall()
     return [dict(row) for row in rows]
+
+
+# Returns aggregate information about all orders
+def get_order_stats(path=None):
+    with get_connection(path) as connection:
+        rows = connection.execute('''
+            SELECT status, COUNT(*) AS count, COALESCE(SUM(total_price), 0) AS revenue
+            FROM orders
+            GROUP BY status
+            ORDER BY status
+        ''').fetchall()
+        total = connection.execute('''
+            SELECT COUNT(*) AS count, COALESCE(SUM(total_price), 0) AS revenue
+            FROM orders
+        ''').fetchone()
+
+    by_status = {
+        row['status']: {'count': row['count'], 'revenue': row['revenue']}
+        for row in rows
+    }
+    total_orders = total['count']
+    total_revenue = total['revenue']
+    return {
+        'total_orders': total_orders,
+        'total_revenue': total_revenue,
+        'average_order_value': round(total_revenue / total_orders, 2) if total_orders else 0,
+        'by_status': by_status,
+    }
 
 
 # Updates the current order status and courier

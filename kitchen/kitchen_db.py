@@ -166,3 +166,14 @@ def get_kitchen_order(order_id, path=None):
     with get_connection(path) as connection:
         row = connection.execute('SELECT * FROM kitchen_orders WHERE order_id = ?', (order_id,)).fetchone()
     return dict(row) if row else None
+
+
+# Returns recent kitchen journal records
+def list_kitchen_orders(limit=50, path=None):
+    with get_connection(path) as connection:
+        rows = connection.execute('''
+            SELECT * FROM kitchen_orders
+            ORDER BY created_at DESC, order_id DESC
+            LIMIT ?
+        ''', (limit,)).fetchall()
+    return [dict(row) for row in rows]

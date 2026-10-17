@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 
 # RabbitMQ channel stub: records published messages and acknowledgements
 class FakeChannel:
@@ -108,3 +110,101 @@ def test_process_order_forwards_to_delivery(kitchen_module, monkeypatch):
     # The order is written to the kitchen database
     assert kitchen_module.kitchen.get_order(7)['status'] == 'ready'
     assert channel.acked == [1]
+
+
+# 6. Availability is calculated from the recipe and current stock
+def test_check_availability(kitchen):
+    available = kitchen.check_availability('Pepperoni', 2)
+    assert available['available'] is True
+    assert available['pizza_name'] == 'Pepperoni'
+    assert all(item['required'] == item['per_pizza'] * 2 for item in available['ingredients'])
+
+    kitchen.set_stock('pepperoni', 10)
+    missing = kitchen.check_availability('pepperoni', 2)
+    assert missing['available'] is False
+    assert 'pepperoni' in missing['missing']
+
+    with pytest.raises(KeyError):
+        kitchen.check_availability('sushi', 1)
+
+    with pytest.raises(ValueError):
+        kitchen.check_availability('pepperoni', 0)
+
+
+# 7. The kitchen journal can be listed
+def test_list_kitchen_orders(kitchen):
+    kitchen.cook(100, 'margherita', 1)
+    kitchen.cook(101, 'pepperoni', 1)
+
+    orders = kitchen.list_orders(limit=1)
+    assert len(orders) == 1
+    assert orders[0]['order_id'] in (100, 101)
+
+
+# 8. The RPC handler exposes recipes, stock, availability and the journal
+def test_rpc_handler(kitchen_module):
+    status, body = kitchen_module.handle_request({'action': 'recipes'})
+    assert status == 200
+    assert any(recipe['code'] == 'pepperoni' for recipe in body)
+
+    status, body = kitchen_module.handle_request({
+        'action': 'recipe', 'payload': {'code': 'diablo'}})
+    assert status == 200
+    assert body['cook_time'] == 4
+
+    status, _ = kitchen_module.handle_request({
+        'action': 'recipe', 'payload': {'code': 'sushi'}})
+    assert status == 404
+
+    status, body = kitchen_module.handle_request({'action': 'stock'})
+    assert status == 200
+    assert any(item['name'] == 'dough' for item in body)
+
+    status, body = kitchen_module.handle_request({
+        'action': 'check_availability',
+        'payload': {'pizza': 'pepperoni', 'quantity': 1},
+    })
+    assert status == 200
+    assert body['available'] is True
+
+    status, _ = kitchen_module.handle_request({
+        'action': 'check_availability',
+        'payload': {'pizza': 'sushi', 'quantity': 1},
+    })
+    assert status == 404
+
+    status, body = kitchen_module.handle_request({
+        'action': 'restock',
+        'payload': {'ingredient': 'basil', 'amount': 10},
+    })
+    assert status == 200
+    assert body['name'] == 'basil'
+
+    status, _ = kitchen_module.handle_request({
+        'action': 'restock',
+        'payload': {'ingredient': 'unicorn', 'amount': 10},
+    })
+    assert status == 404
+
+    status, body = kitchen_module.handle_request({
+        'action': 'set_stock',
+        'payload': {'ingredient': 'basil', 'amount': 5},
+    })
+    assert status == 200
+    assert body['stock'] == 5
+
+    kitchen_module.kitchen.cook(200, 'margherita', 1)
+
+    status, body = kitchen_module.handle_request({
+        'action': 'orders', 'payload': {'limit': 10}})
+    assert status == 200
+    assert any(order['order_id'] == 200 for order in body)
+
+    status, body = kitchen_module.handle_request({
+        'action': 'order', 'payload': {'order_id': 200}})
+    assert status == 200
+    assert body['status'] == 'ready'
+
+    status, _ = kitchen_module.handle_request({
+        'action': 'order', 'payload': {'order_id': 999999}})
+    assert status == 404

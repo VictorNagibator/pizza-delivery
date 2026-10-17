@@ -7,10 +7,27 @@ FREE_DELIVERY_FROM = 1000   # Free delivery from this amount
 BULK_DISCOUNT_FROM = 3      # Discount from this quantity of pizzas
 BULK_DISCOUNT = 0.1         # Discount size (10%)
 
+# All statuses that can appear in the order lifecycle
+ORDER_STATUSES = {
+    'new', 'cooking', 'ready', 'delivering', 'delivered',
+    'rejected', 'delivery_queued', 'publish_failed', 'cancelled',
+}
+
+# Statuses after which the order is not processed anymore
+FINAL_STATUSES = {'delivered', 'rejected', 'cancelled', 'publish_failed'}
+
 
 # Normalizes a pizza name: "Four Cheese" -> "four_cheese"
 def normalize_pizza(pizza):
     return re.sub(r'[\s\-]+', '_', str(pizza).strip().lower())
+
+
+# Normalizes and validates an order status
+def normalize_status(status):
+    value = str(status or '').strip().lower()
+    if value not in ORDER_STATUSES:
+        raise ValueError(f'Unknown order status: "{status}"')
+    return value
 
 
 # Order domain logic backed by the orders database.
@@ -83,9 +100,29 @@ class OrderService:
     def list_orders(self):
         return order_db.list_orders(self.db_path)
 
+    # Returns orders filtered by status
+    def list_orders_by_status(self, status):
+        return order_db.list_orders(self.db_path, normalize_status(status))
+
+    # Returns aggregate order statistics
+    def get_order_stats(self):
+        return order_db.get_order_stats(self.db_path)
+
     # Returns one order by id
     def get_order(self, order_id):
         return order_db.get_order(order_id, self.db_path)
+
+    # Cancels an order that is not in a final state yet
+    def cancel_order(self, order_id):
+        order = self.get_order(order_id)
+        if order is None:
+            raise KeyError(order_id)
+        if order['status'] in FINAL_STATUSES:
+            raise ValueError(
+                f'Order cannot be cancelled from status "{order["status"]}"')
+
+        order_db.update_status(order_id, 'cancelled', None, self.db_path)
+        return self.get_order(order_id)
 
     # Updates the current order status and, optionally, the courier
     def update_status(self, order_id, status, courier=None):

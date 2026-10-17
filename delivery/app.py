@@ -3,10 +3,11 @@ import json
 import time
 import pika
 
-from delivery_logic import Dispatcher
+from delivery_logic import CourierAlreadyExists, Dispatcher
 
 # RabbitMQ address comes from the environment
 RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
+RPC_QUEUE = 'delivery_rpc'
 DELIVERY_QUEUE = 'delivery_orders'
 STATUS_QUEUE = 'order_status'
 
@@ -26,6 +27,50 @@ def get_rabbitmq_connection():
     return pika.BlockingConnection(parameters)
 
 
+# Handles a domain request and returns an HTTP-like (status, body) pair.
+# This is pure logic and can be tested without a broker.
+def handle_request(request):
+    action = request.get('action')
+    payload = request.get('payload') or {}
+
+    if action == 'couriers':
+        return 200, dispatcher.list_couriers()
+
+    if action == 'courier':
+        courier = dispatcher.get_courier(payload.get('courier_id'))
+        if courier is None:
+            return 404, {'error': 'Courier not found'}
+        return 200, courier
+
+    if action == 'register_courier':
+        try:
+            courier = dispatcher.register_courier(
+                payload.get('name'), payload.get('phone'))
+        except CourierAlreadyExists as error:
+            return 409, {'error': str(error)}
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 201, courier
+
+    if action in ('deliveries', 'delivery_list'):
+        try:
+            deliveries = dispatcher.list_deliveries(payload.get('limit'))
+        except ValueError as error:
+            return 400, {'error': str(error)}
+        return 200, deliveries
+
+    if action == 'delivery':
+        delivery = dispatcher.get_delivery(payload.get('order_id'))
+        if delivery is None:
+            return 404, {'error': 'Delivery not found'}
+        return 200, delivery
+
+    if action == 'delivery_stats':
+        return 200, dispatcher.get_stats()
+
+    return 404, {'error': f'Unknown action: {action}'}
+
+
 # Publishes a message to the given queue
 def publish(channel, queue, message):
     channel.queue_declare(queue=queue, durable=True)
@@ -35,6 +80,21 @@ def publish(channel, queue, message):
         body=json.dumps(message, ensure_ascii=False),
         properties=pika.BasicProperties(delivery_mode=2)
     )
+
+
+# Handles an RPC request and sends the reply to the callback queue
+def on_request(ch, method, props, body):
+    request = json.loads(body)
+    status, response_body = handle_request(request)
+
+    reply = {'status': status, 'body': response_body}
+    ch.basic_publish(
+        exchange='',
+        routing_key=props.reply_to,
+        properties=pika.BasicProperties(correlation_id=props.correlation_id),
+        body=json.dumps(reply, ensure_ascii=False)
+    )
+    ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
 # Handles an order from the delivery queue
@@ -89,21 +149,23 @@ def dispatch_waiting(ch):
         print(f' [Delivery] Queued order #{order_id} delivered by {courier}', flush=True)
 
 
-# Starts the consumer for the delivery queue
+# Starts the RPC consumer and the delivery queue consumer
 def main():
     connection = get_rabbitmq_connection()
     channel = connection.channel()
 
+    channel.queue_declare(queue=RPC_QUEUE, durable=True)
     channel.queue_declare(queue=DELIVERY_QUEUE, durable=True)
     channel.queue_declare(queue=STATUS_QUEUE, durable=True)
     channel.basic_qos(prefetch_count=1)
 
+    channel.basic_consume(queue=RPC_QUEUE, on_message_callback=on_request)
     channel.basic_consume(
         queue=DELIVERY_QUEUE,
         on_message_callback=process_delivery
     )
 
-    print(' [Delivery] Waiting for delivery orders... Press CTRL+C to exit', flush=True)
+    print(' [Delivery] Waiting for RPC requests and delivery orders... Press CTRL+C to exit', flush=True)
     channel.start_consuming()
 
 
