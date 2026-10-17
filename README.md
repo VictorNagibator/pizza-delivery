@@ -277,14 +277,6 @@ Menu service.
 
 ## Menu
 
-| Code          | Name         | Price |
-|---------------|--------------|-------|
-| `margherita`  | Margherita   | 450   |
-| `pepperoni`   | Pepperoni    | 550   |
-| `four_cheese` | Four Cheese  | 650   |
-| `hawaiian`    | Hawaiian     | 600   |
-| `diablo`      | Diablo       | 620   |
-
 The menu is stored in the `menu` table of the Menu database. Orders stores
 orders and asks the Menu service for one item while pricing an order. The menu
 table is created empty; sample data is inserted only when `SEED_DATA=1` for the
