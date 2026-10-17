@@ -6,7 +6,8 @@ logic and its own SQLite database.
 
 The client talks to the **Gateway** over HTTP. The Gateway is an API layer that
 calls backend services over RabbitMQ using synchronous RPC (request/reply with a
-correlation id). Orders, Kitchen and Delivery exchange messages asynchronously.
+correlation id). Orders, Kitchen, Delivery and History exchange events
+asynchronously.
 
 ## Architecture
 
@@ -17,6 +18,8 @@ flowchart LR
     Gateway -->|"menu_rpc"| Menu[Menu]
     Gateway -->|"orders_rpc"| Orders[Orders]
     Gateway -->|"history_rpc"| History[History]
+    Gateway -->|"kitchen_rpc"| Kitchen[Kitchen]
+    Gateway -->|"delivery_rpc"| Delivery[Delivery]
 
     Orders -->|"menu_rpc"| Menu
     Orders -->|"kitchen_orders"| Kitchen[Kitchen]
@@ -28,8 +31,9 @@ flowchart LR
 ```
 
 Nodes are services, and every edge label is a RabbitMQ queue name. Labels ending
-in `_rpc` (`menu_rpc`, `orders_rpc`, `history_rpc`) are synchronous RPC calls;
-all other arrows are asynchronous messages.
+in `_rpc` (`menu_rpc`, `orders_rpc`, `history_rpc`, `kitchen_rpc`,
+`delivery_rpc`) are synchronous RPC calls; all other arrows are asynchronous
+messages.
 
 Service responsibilities:
 
@@ -48,8 +52,8 @@ by its own queue, so the Gateway can add new capabilities without changing the
 other services.
 
 Each service owns its database exclusively. No service reads another service's
-tables: Menu is reached over `menu_rpc`, History over `history_rpc`, and status
-changes travel as events.
+tables: the Gateway reaches Menu, Orders, History, Kitchen and Delivery over
+their own `*_rpc` queues, and status changes travel as events.
 
 ## Order lifecycle
 
