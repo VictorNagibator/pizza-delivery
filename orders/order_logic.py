@@ -13,24 +13,21 @@ def normalize_pizza(pizza):
     return re.sub(r'[\s\-]+', '_', str(pizza).strip().lower())
 
 
-# Order domain logic backed by the orders database (menu lives in the DB)
+# Order domain logic backed by the orders database.
+# Menu data is not stored here: it is requested from the menu service.
 class OrderService:
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, menu=None):
         self.db_path = db_path
+        self.menu = menu
         order_db.init_db(db_path)
 
-    # Fills the menu with default data (optional)
-    def seed(self):
-        return order_db.seed(self.db_path)
-
-    # Returns the whole menu
-    def get_menu(self):
-        return order_db.get_menu(self.db_path)
-
-    # Calculates the order price
+    # Calculates the order price using the menu catalog
     def calculate_price(self, pizza, quantity):
         code = normalize_pizza(pizza)
-        item = order_db.get_pizza(code, self.db_path)
+        if self.menu is None:
+            raise RuntimeError('Menu client is not configured')
+
+        item = self.menu.get_pizza(code)
         if item is None:
             raise ValueError(f'Pizza "{pizza}" is not on the menu')
         if quantity < 1:
@@ -90,12 +87,6 @@ class OrderService:
     def get_order(self, order_id):
         return order_db.get_order(order_id, self.db_path)
 
-    # Returns the status history of an order
-    def get_history(self, order_id):
-        if order_db.get_order(order_id, self.db_path) is None:
-            raise KeyError(order_id)
-        return order_db.get_history(order_id, self.db_path)
-
-    # Updates the order status and, optionally, the courier
+    # Updates the current order status and, optionally, the courier
     def update_status(self, order_id, status, courier=None):
         return order_db.update_status(order_id, status, courier, self.db_path)

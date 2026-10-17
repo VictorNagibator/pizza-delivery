@@ -2,6 +2,7 @@ import os
 import json
 import pika
 
+from menu_client import MenuClient, MenuUnavailable
 from order_logic import OrderService
 
 # RabbitMQ address comes from the environment
@@ -9,9 +10,10 @@ RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
 RPC_QUEUE = 'orders_rpc'
 STATUS_QUEUE = 'order_status'
 KITCHEN_QUEUE = 'kitchen_orders'
+HISTORY_QUEUE = 'order_history'
 
-# Orders service backed by its own database
-service = OrderService()
+# Orders service backed by its own database and a menu RPC client
+service = OrderService(menu=MenuClient(RABBITMQ_HOST))
 
 
 # Creates a RabbitMQ connection
@@ -26,20 +28,19 @@ def get_rabbitmq_connection():
     return pika.BlockingConnection(parameters)
 
 
-# Handles a domain request and returns an HTTP-like (status, body) pair
-# This is pure logic and can be tested without a broker
+# Handles a domain request and returns an HTTP-like (status, body) pair.
+# This is pure logic and can be tested without a broker.
 def handle_request(request):
     action = request.get('action')
     payload = request.get('payload') or {}
-
-    if action == 'menu':
-        return 200, service.get_menu()
 
     if action == 'create_order':
         try:
             order = service.create_order(payload)
         except ValueError as error:
             return 400, {'error': str(error)}
+        except MenuUnavailable as error:
+            return 503, {'error': f'Menu service is unavailable: {error}'}
         return 202, order
 
     if action == 'list_orders':
@@ -50,12 +51,6 @@ def handle_request(request):
         if order is None:
             return 404, {'error': 'Order not found'}
         return 200, order
-
-    if action == 'get_history':
-        try:
-            return 200, service.get_history(payload.get('order_id'))
-        except KeyError:
-            return 404, {'error': 'Order not found'}
 
     return 404, {'error': f'Unknown action: {action}'}
 
@@ -71,19 +66,35 @@ def publish(channel, queue, message):
     )
 
 
+# Sends one status event to the history service
+def publish_history(channel, order_id, status, courier=None, reason=None):
+    publish(channel, HISTORY_QUEUE, {
+        'order_id': order_id,
+        'status': status,
+        'courier': courier,
+        'reason': reason,
+    })
+
+
 # Handles an RPC request and sends the reply to the callback queue
 def on_request(ch, method, props, body):
     request = json.loads(body)
     status, response_body = handle_request(request)
 
-    # A successfully created order is published to the kitchen
+    # A successfully created order is recorded in history and sent to the kitchen
     if request.get('action') == 'create_order' and status == 202:
+        order_id = response_body['order_id']
         try:
+            publish_history(ch, order_id, 'new')
             publish(ch, KITCHEN_QUEUE, response_body)
         except Exception as error:
-            service.update_status(response_body['order_id'], 'publish_failed')
+            service.update_status(order_id, 'publish_failed')
+            try:
+                publish_history(ch, order_id, 'publish_failed')
+            except Exception:
+                pass
             status = 500
-            response_body = {'error': str(error), 'order_id': response_body['order_id']}
+            response_body = {'error': str(error), 'order_id': order_id}
 
     reply = {'status': status, 'body': response_body}
     ch.basic_publish(
@@ -95,14 +106,29 @@ def on_request(ch, method, props, body):
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
-# Handles a status update message from the order_status queue
+# Handles a status update from kitchen or delivery and forwards it to history
 def on_status(ch, method, properties, body):
     try:
         update = json.loads(body)
-        service.update_status(update['order_id'], update['status'], update.get('courier'))
-        print(f' [Orders] Order #{update["order_id"]} -> {update["status"]}', flush=True)
+        order_id = update['order_id']
+        status = update['status']
+        updated = service.update_status(order_id, status, update.get('courier'))
     except Exception as error:
-        print(f' [Orders] Failed to update status: {error}', flush=True)
+        print(f' [Orders] Failed to process status event: {error}', flush=True)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        return
+
+    if not updated:
+        print(f' [Orders] Order #{order_id} not found', flush=True)
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        return
+
+    try:
+        publish_history(ch, order_id, status, update.get('courier'), update.get('reason'))
+        print(f' [Orders] Order #{order_id} -> {status}', flush=True)
+    except Exception as error:
+        # The order state is already updated; only the audit event was lost.
+        print(f' [Orders] Order #{order_id} updated, history publish failed: {error}', flush=True)
     finally:
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -115,6 +141,7 @@ def main():
     channel.queue_declare(queue=RPC_QUEUE, durable=True)
     channel.queue_declare(queue=STATUS_QUEUE, durable=True)
     channel.queue_declare(queue=KITCHEN_QUEUE, durable=True)
+    channel.queue_declare(queue=HISTORY_QUEUE, durable=True)
     channel.basic_qos(prefetch_count=1)
 
     channel.basic_consume(queue=RPC_QUEUE, on_message_callback=on_request)
@@ -125,6 +152,4 @@ def main():
 
 
 if __name__ == '__main__':
-    if os.getenv('SEED_DATA', '0') == '1':
-        service.seed()
     main()

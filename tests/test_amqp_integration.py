@@ -1,7 +1,6 @@
 import json
 import os
 import threading
-import time
 import uuid
 
 import pika
@@ -11,6 +10,7 @@ RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
 KITCHEN_QUEUE = 'kitchen_orders'
 DELIVERY_QUEUE = 'delivery_orders'
 STATUS_QUEUE = 'order_status'
+HISTORY_QUEUE = 'order_history'
 
 
 # Try to connect to the broker: if it is not there, the tests are skipped
@@ -34,14 +34,14 @@ pytestmark = pytest.mark.skipif(
 def channel():
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
     ch = connection.channel()
-    for queue in (KITCHEN_QUEUE, DELIVERY_QUEUE, STATUS_QUEUE):
+    for queue in (KITCHEN_QUEUE, DELIVERY_QUEUE, STATUS_QUEUE, HISTORY_QUEUE):
         ch.queue_declare(queue=queue, durable=True)
         ch.queue_purge(queue=queue)
     yield ch
     connection.close()
 
 
-# Minimal RPC server running the orders handler in a background thread.
+# Minimal RPC server running a service handler in a background thread.
 # The connection is created and used only inside the thread (pika is not thread safe).
 class RpcServer(threading.Thread):
     def __init__(self, queue, handler):
@@ -70,14 +70,29 @@ class RpcServer(threading.Thread):
 
 
 @pytest.fixture
-def rpc_server(orders, orders_module):
-    # The 'orders' fixture creates the test database tables
+def menu_rpc_server(menu_module):
+    queue = f'menu_rpc_test_{uuid.uuid4().hex}'
+    server = RpcServer(queue, menu_module.on_request)
+    server.start()
+    assert server.ready.wait(timeout=5)
+    yield server, queue
+    server.stop()
+
+
+@pytest.fixture
+def rpc_server(orders, orders_module, menu_rpc_server):
+    # Orders uses the menu service over a real RPC round-trip
+    _, menu_queue = menu_rpc_server
+    old_menu = orders_module.service.menu
+    orders_module.service.menu = orders_module.MenuClient(RABBITMQ_HOST, queue=menu_queue)
+
     queue = f'orders_rpc_test_{uuid.uuid4().hex}'
     server = RpcServer(queue, orders_module.on_request)
     server.start()
     assert server.ready.wait(timeout=5)
     yield server, queue
     server.stop()
+    orders_module.service.menu = old_menu
 
 
 # Publishes an order to the kitchen queue and returns its (method, properties, body)
@@ -141,9 +156,9 @@ def test_kitchen_amqp_rejects_unknown_pizza(channel, kitchen_module, monkeypatch
     assert delivery_method is None
 
 
-# The gateway RPC client reaches the orders handler over a real broker
-def test_orders_rpc_menu(rpc_server, gateway):
-    _, queue = rpc_server
+# The gateway RPC client reaches the menu service over a real broker
+def test_menu_rpc(menu_rpc_server, gateway):
+    _, queue = menu_rpc_server
 
     response = gateway.rpc.call(queue, {'action': 'menu', 'payload': None})
 
@@ -151,7 +166,8 @@ def test_orders_rpc_menu(rpc_server, gateway):
     assert 'margherita' in response['body']
 
 
-# A created order is published to the kitchen queue
+# A created order gets a price from the menu service, is published to the kitchen
+# and produces the first history event
 def test_orders_rpc_creates_order(rpc_server, gateway, channel):
     _, queue = rpc_server
 
@@ -162,7 +178,14 @@ def test_orders_rpc_creates_order(rpc_server, gateway, channel):
 
     assert response['status'] == 202
     assert response['body']['pizza_name'] == 'Pepperoni'
+    assert response['body']['unit_price'] == 550
 
-    method, _, body = channel.basic_get(queue=KITCHEN_QUEUE, auto_ack=True)
-    assert method is not None
-    assert json.loads(body)['pizza'] == 'pepperoni'
+    kitchen_method, _, kitchen_body = channel.basic_get(queue=KITCHEN_QUEUE, auto_ack=True)
+    assert kitchen_method is not None
+    assert json.loads(kitchen_body)['pizza'] == 'pepperoni'
+
+    history_method, _, history_body = channel.basic_get(queue=HISTORY_QUEUE, auto_ack=True)
+    assert history_method is not None
+    event = json.loads(history_body)
+    assert event['order_id'] == response['body']['order_id']
+    assert event['status'] == 'new'

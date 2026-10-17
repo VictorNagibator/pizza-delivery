@@ -1,69 +1,101 @@
 # Pizza Delivery Microservices
 
-A small event-driven pizza delivery system built with four Python services that
+A small event-driven pizza delivery system built with six Python services that
 communicate through RabbitMQ (AMQP). Each business service owns its own domain
 logic and its own SQLite database.
 
-The client talks to the **Gateway** over HTTP. The Gateway is an API layer
-that calls backend services over RabbitMQ using synchronous RPC (request/reply
-with a correlation id). Orders, Kitchen and Delivery exchange messages
-asynchronously.
+The client talks to the **Gateway** over HTTP. The Gateway is an API layer that
+calls backend services over RabbitMQ using synchronous RPC (request/reply with a
+correlation id). Orders, Kitchen and Delivery exchange messages asynchronously.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client([Client]) -->|"HTTP"| Gateway[Gateway]
+    Client([Client]) -->|HTTP| Gateway[Gateway]
+
+    Gateway -->|"menu_rpc"| Menu[Menu]
     Gateway -->|"orders_rpc"| Orders[Orders]
+    Gateway -->|"history_rpc"| History[History]
+
+    Orders -->|"menu_rpc"| Menu
     Orders -->|"kitchen_orders"| Kitchen[Kitchen]
+    Orders -->|"order_history"| History
+
     Kitchen -->|"delivery_orders"| Delivery[Delivery]
     Kitchen -->|"order_status"| Orders
     Delivery -->|"order_status"| Orders
 ```
 
-Nodes are services, and every edge label is a RabbitMQ queue name. The Gateway
-calls Orders synchronously over RPC on `orders_rpc`; all other arrows are
-asynchronous messages. Kitchen and Delivery report every status change
-(`cooking`, `ready`, `delivering`, `delivered`, `rejected`) to the shared
-`order_status` queue, which Orders consumes to update the order history.
+Nodes are services, and every edge label is a RabbitMQ queue name. Labels ending
+in `_rpc` (`menu_rpc`, `orders_rpc`, `history_rpc`) are synchronous RPC calls;
+all other arrows are asynchronous messages.
 
 Service responsibilities:
 
-| Service    | Role                                        | Storage                       |
-|------------|---------------------------------------------|-------------------------------|
-| `gateway`  | Thin HTTP API and AMQP RPC client           | none                          |
-| `orders`   | Pricing, orders, status history, AMQP       | SQLite `orders_data` volume   |
-| `kitchen`  | Recipes, ingredient stock, cooking          | SQLite `kitchen_data` volume  |
-| `delivery` | Couriers, delivery assignment               | SQLite `delivery_data` volume |
+| Service    | Role                                            | Storage                              |
+|------------|-------------------------------------------------|--------------------------------------|
+| `gateway`  | Thin HTTP API and AMQP RPC client               | none                                 |
+| `menu`     | Pizza catalog and prices                        | SQLite `menu_data` / `menu`          |
+| `orders`   | Order lifecycle, pricing, current status        | SQLite `orders_data` / `orders`      |
+| `history`  | Append-only order status history                | SQLite `history_data` / `order_status_history` |
+| `kitchen`  | Recipes, ingredient stock, cooking              | SQLite `kitchen_data` volume         |
+| `delivery` | Couriers, delivery assignment                   | SQLite `delivery_data` volume        |
 
 The Gateway does not contain business logic and does not touch the database. It
-only translates HTTP requests into RPC calls.
+only translates HTTP requests into RPC calls. Every backend service is reachable
+by its own queue, so the Gateway can add new capabilities without changing the
+other services.
+
+Each service owns its database exclusively. No service reads another service's
+tables: Menu is reached over `menu_rpc`, History over `history_rpc`, and status
+changes travel as events.
 
 ## Order lifecycle
 
-1. The client calls `POST /order`. The Gateway sends an RPC request to the
-   `orders_rpc` queue and waits for the reply.
-2. Orders calculates the price (volume discount + delivery fee), stores the order
-   with status `new`, publishes it to `kitchen_orders` and replies with the order.
-3. Kitchen looks up the recipe, checks the ingredient stock and either rejects the
-   order or cooks it. It reports `cooking` and `ready`, then sends the order to
-   `delivery_orders`.
-4. Delivery picks the least loaded free courier, reports `delivering`, then
-   `delivered`.
-5. Orders consumes status messages from `order_status` and appends them to the
-   order history.
+1. The client calls `POST /order`. The Gateway sends an RPC request to
+   `orders_rpc` and waits for the reply.
+2. Orders normalizes the pizza code and asks the Menu service over `menu_rpc` for
+   the name and price. The Menu service answers with one menu item.
+3. Orders calculates the price (volume discount + delivery fee), stores the order
+   with status `new` in `orders_data`, publishes a `new` event to
+   `order_history`, publishes the order to `kitchen_orders` and replies.
+4. Kitchen looks up the recipe, checks the ingredient stock and either rejects the
+   order or cooks it. It reports `cooking` and `ready` on `order_status`, then
+   sends the order to `delivery_orders`.
+5. Delivery picks the least loaded free courier, reports `delivering`, then
+   `delivered` on `order_status`.
+6. Orders consumes `order_status`, updates the current order state and forwards
+   every event to `order_history`.
+7. History appends the event to `history_data`. `GET /orders/<id>/history`
+   reaches the History service directly over `history_rpc`.
 
 Statuses: `new` -> `cooking` -> `ready` -> `delivering` -> `delivered`.
 A rejected order becomes `rejected`; if all couriers are busy an order can also
-become `delivery_queued` (waiting for a free courier).
+become `delivery_queued` (waiting for a free courier). If the order cannot be
+published to Kitchen, it is stored with status `publish_failed`.
+
+## Internal queues
+
+| Queue             | Producer                 | Consumer  | Type  | Purpose                         |
+|-------------------|--------------------------|-----------|-------|---------------------------------|
+| `menu_rpc`        | Gateway, Orders          | Menu      | RPC   | menu and one pizza lookup       |
+| `orders_rpc`      | Gateway                  | Orders    | RPC   | create/read orders              |
+| `history_rpc`     | Gateway                  | History   | RPC   | read status history             |
+| `kitchen_orders`  | Orders                   | Kitchen   | async | start cooking                   |
+| `delivery_orders` | Kitchen                  | Delivery  | async | assign a courier                |
+| `order_status`    | Kitchen, Delivery        | Orders    | async | status change of the order      |
+| `order_history`   | Orders                   | History   | async | append a status to the log      |
 
 ## Stack
 
-* Python 3.12 + Flask
+* Python 3.12
 * Pika (RabbitMQ client, AMQP RPC)
 * RabbitMQ 4.0
 * SQLite (per-service storage)
 * Docker Compose
+
+The Gateway uses Flask; the backend services are plain Python consumers.
 
 ## Project structure
 
@@ -71,20 +103,30 @@ become `delivery_queued` (waiting for a free courier).
 pizza-delivery/
 ├── docker-compose.yaml
 ├── gateway/
-│   ├── app.py              # thin API, calls orders_rpc
-│   └── rpc_client.py       # synchronous AMQP RPC client
+│   ├── app.py                  # thin HTTP API, calls all backend queues
+│   └── rpc_client.py           # synchronous AMQP RPC client
+├── menu/
+│   ├── app.py                  # menu_rpc consumer
+│   ├── menu_logic.py           # catalog logic
+│   └── menu_db.py              # menu table
 ├── orders/
-│   ├── app.py              # orders_rpc and order_status consumer
-│   ├── order_logic.py      # pricing logic
-│   └── order_db.py         # menu, orders and status history
+│   ├── app.py                  # orders_rpc and order_status consumer
+│   ├── order_logic.py          # pricing logic (price comes from Menu)
+│   ├── order_db.py             # orders table
+│   ├── menu_client.py          # RPC client for the Menu service
+│   └── rpc_client.py           # synchronous AMQP RPC client
+├── history/
+│   ├── app.py                  # order_history and history_rpc consumer
+│   ├── history_logic.py        # status log logic
+│   └── history_db.py           # order_status_history table
 ├── kitchen/
-│   ├── app.py              # kitchen_orders consumer
-│   ├── kitchen_logic.py    # cooking logic
-│   └── kitchen_db.py       # recipes, ingredients, kitchen journal
+│   ├── app.py                  # kitchen_orders consumer
+│   ├── kitchen_logic.py        # cooking logic
+│   └── kitchen_db.py           # recipes, ingredients, kitchen journal
 ├── delivery/
-│   ├── app.py              # delivery_orders consumer
-│   ├── delivery_logic.py   # courier assignment
-│   └── delivery_db.py      # couriers and deliveries
+│   ├── app.py                  # delivery_orders consumer
+│   ├── delivery_logic.py       # courier assignment
+│   └── delivery_db.py          # couriers and deliveries
 ├── tests/
 └── requirements-test.txt
 ```
@@ -98,7 +140,7 @@ docker compose up --build
 Endpoints and tools:
 
 * Gateway API: http://localhost:5000
-* RabbitMQ Management UI: http://localhost:15672
+* RabbitMQ Management UI: http://localhost:15672 (guest / guest)
 
 Create an order:
 
@@ -129,26 +171,25 @@ docker compose down -v
 
 ## API
 
-The Gateway exposes the public API on port 5000 and forwards it over AMQP RPC to
-the Orders service (`orders_rpc` queue).
+The Gateway routes each HTTP endpoint to the service that owns the data.
 
-| Method | Path                    | Description                       |
-|--------|-------------------------|-----------------------------------|
-| GET    | `/menu`                 | pizza menu and prices             |
-| POST   | `/order`                | create an order                   |
-| GET    | `/orders`               | list all orders                   |
-| GET    | `/orders/<id>`          | one order with status and courier |
-| GET    | `/orders/<id>/history`  | full status history of an order   |
+| Method | Path                    | Backend queue  | Description                       |
+|--------|-------------------------|----------------|-----------------------------------|
+| GET    | `/menu`                 | `menu_rpc`     | pizza menu and prices             |
+| POST   | `/order`                | `orders_rpc`   | create an order                   |
+| GET    | `/orders`               | `orders_rpc`   | list all orders                   |
+| GET    | `/orders/<id>`          | `orders_rpc`   | one order with status and courier |
+| GET    | `/orders/<id>/history`  | `history_rpc`  | full status history of an order   |
 
 ### POST /order
 
 Request fields:
 
-| Field      | Type   | Required | Notes                              |
-|------------|--------|----------|------------------------------------|
+| Field      | Type   | Required | Notes                               |
+|------------|--------|----------|-------------------------------------|
 | `pizza`    | string | yes      | menu code or name, case-insensitive |
-| `address`  | string | yes      | delivery address                   |
-| `quantity` | int    | no       | defaults to 1                      |
+| `address`  | string | yes      | delivery address                    |
+| `quantity` | int    | no       | defaults to 1                       |
 
 Example response (`202 Accepted`):
 
@@ -172,10 +213,58 @@ Errors:
 * `400` — missing/unknown pizza, empty address or invalid quantity;
 * `500` — the message broker is unavailable (order is stored with status
   `publish_failed`);
-* `503` — no reply from the Orders service within the RPC timeout.
+* `503` — a required service did not answer: `Menu service is unavailable` when
+  the price cannot be requested, or `Orders service is unavailable` /
+  `History service is unavailable` at the Gateway.
 
 Pricing rules: 10% discount from 3 pizzas, delivery costs 100 and is free from
-1000.
+1000. Pricing belongs to the Orders service, while the unit price comes from the
+Menu service.
+
+## Menu
+
+| Code          | Name         | Price |
+|---------------|--------------|-------|
+| `margherita`  | Margherita   | 450   |
+| `pepperoni`   | Pepperoni    | 550   |
+| `four_cheese` | Four Cheese  | 650   |
+| `hawaiian`    | Hawaiian     | 600   |
+| `diablo`      | Diablo       | 620   |
+
+The menu is stored in the `menu` table of the Menu database. Orders stores
+orders and asks the Menu service for one item while pricing an order. The menu
+table is created empty; sample data is inserted only when `SEED_DATA=1` for the
+Menu service (Docker Compose sets it for the demo).
+
+Inspect the menu:
+
+```bash
+docker compose exec menu python -c "import menu_db, json; print(json.dumps(menu_db.get_menu(), indent=2))"
+```
+
+## Data
+
+Data is kept in named Docker volumes, so it survives restarts:
+
+* `menu_data` — `menu`;
+* `orders_data` — `orders` (current state only);
+* `history_data` — `order_status_history`;
+* `kitchen_data` — `recipes`, `ingredients`, `recipe_ingredients`,
+  `kitchen_orders`;
+* `delivery_data` — `couriers`, `deliveries`.
+
+On start each service creates only its schema (`init_db`). Sample data (the menu,
+recipes and stock, the initial couriers) is inserted by a separate idempotent
+`seed()` call and only when the `SEED_DATA=1` environment variable is set. Docker
+Compose enables it for the demo; remove the variable to run with empty tables.
+
+Inspect the kitchen stock, couriers and history directly:
+
+```bash
+docker compose exec kitchen python -c "import kitchen_db, json; print(json.dumps(kitchen_db.get_stock(), indent=2))"
+docker compose exec delivery python -c "import delivery_db, json; print(json.dumps(delivery_db.list_couriers(), indent=2))"
+docker compose exec history python -c "import history_db, json; print(json.dumps(history_db.get_history(1), indent=2))"
+```
 
 ## Adding a new service
 
@@ -184,19 +273,8 @@ Because the Gateway calls services by queue name, adding a service means:
 1. create a consumer for a new `*_rpc` queue (a new `action` handler);
 2. add one route in the Gateway that calls that queue.
 
-## Data
-
-Data is kept in named Docker volumes, so it survives restarts:
-
-* `orders_data` — `menu`, `orders`, `order_status_history`;
-* `kitchen_data` — `recipes`, `ingredients`, `recipe_ingredients`,
-  `kitchen_orders`;
-* `delivery_data` — `couriers`, `deliveries`.
-
-On start each service creates only the schema (`init_db`). Sample data (the menu,
-recipes and stock, the initial couriers) is inserted by a separate idempotent
-`seed()` call and only when the `SEED_DATA=1` environment variable is set. Docker
-Compose enables it for the demo; remove the variable to run with empty tables.
+For example, an `auth` service would consume `auth_rpc` and the Gateway would add
+`/auth/login`, without changing Orders, Menu or History.
 
 ## Tests
 
@@ -213,8 +291,10 @@ pytest tests -v
 
 Coverage:
 
-* `tests/test_gateway.py` — Gateway RPC forwarding and error handling;
-* `tests/test_orders.py` — pricing, order storage and status history;
+* `tests/test_gateway.py` — routing to Menu/Orders/History and 503 handling;
+* `tests/test_menu.py` — seed, lookup and RPC actions of the Menu service;
+* `tests/test_orders.py` — pricing, order storage, history events, menu failures;
+* `tests/test_history.py` — status log, idempotency and RPC actions;
 * `tests/test_kitchen.py` — cooking, stock consumption and rejections;
 * `tests/test_delivery.py` — courier assignment, queueing and completion.
 
@@ -227,6 +307,6 @@ docker compose up -d rabbitmq
 pytest tests/test_amqp_integration.py -v
 ```
 
-`tests/test_amqp_integration.py` covers the kitchen message flow and a full RPC
-round-trip between the Gateway RPC client and the Orders handler over a real
-broker.
+`tests/test_amqp_integration.py` covers the kitchen flow, a Menu RPC round-trip
+and a full order creation with a real Menu RPC call, a Kitchen message and a
+History event.

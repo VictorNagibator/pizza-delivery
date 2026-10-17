@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -51,17 +52,23 @@ def test_price_with_discount_and_free_delivery(order_service):
     assert price['total_price'] == 1215
 
 
-# 3. The menu lives in the database and an unknown pizza raises an error
-def test_menu_and_unknown_pizza(order_service):
-    menu = order_service.get_menu()
-    assert menu['pepperoni']['name'] == 'Pepperoni'
-    assert menu['pepperoni']['price'] == 550
-
+# 3. An unknown pizza raises a validation error
+def test_unknown_pizza(order_service):
     with pytest.raises(ValueError):
         order_service.calculate_price('sushi', 1)
 
 
-# 4. The RPC handler stores the order, publishes it to the kitchen and replies
+# 4. The orders database contains orders only: no menu and no history tables
+def test_orders_db_stores_orders_only(order_service):
+    with sqlite3.connect(order_service.db_path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'")}
+
+    assert tables == {'orders'}
+
+
+# 5. The RPC handler stores the order, sends a history event and publishes to the kitchen
 def test_on_request_creates_order(orders):
     channel = FakeChannel()
     props = FakeProperties(reply_to='amq.gen-callback', correlation_id='corr-1')
@@ -78,19 +85,26 @@ def test_on_request_creates_order(orders):
     order_id = reply['body']['body']['order_id']
     assert reply['body']['body']['total_price'] == 1240
 
-    # The order was published to the kitchen and stored in the database
-    kitchen_messages = [item for item in channel.published if item['routing_key'] == orders.KITCHEN_QUEUE]
+    # The first history event was published to the history service
+    history_messages = [item for item in channel.published
+                        if item['routing_key'] == orders.HISTORY_QUEUE]
+    assert len(history_messages) == 1
+    assert history_messages[0]['body'] == {
+        'order_id': order_id, 'status': 'new', 'courier': None, 'reason': None}
+
+    # The order was published to the kitchen and stored in the orders database
+    kitchen_messages = [item for item in channel.published
+                        if item['routing_key'] == orders.KITCHEN_QUEUE]
     assert len(kitchen_messages) == 1
     assert kitchen_messages[0]['body']['pizza'] == 'diablo'
 
     saved = orders.service.get_order(order_id)
     assert saved['status'] == 'new'
-    assert [entry['status'] for entry in orders.service.get_history(order_id)] == ['new']
     assert channel.acked == [1]
 
 
-# 5. Orders can be read back and the history updates
-def test_read_orders_and_history(order_service):
+# 6. Orders can be read back after a status update
+def test_read_orders(order_service):
     created = order_service.create_order({'pizza': 'Hawaiian', 'address': '5 Lenina Avenue'})
     order_id = created['order_id']
 
@@ -104,5 +118,82 @@ def test_read_orders_and_history(order_service):
     assert single['status'] == 'delivered'
     assert single['courier'] == 'Alex'
 
-    history = order_service.get_history(order_id)
-    assert [entry['status'] for entry in history] == ['new', 'cooking', 'delivered']
+
+# 7. A status event updates the order and is forwarded to the history service
+def test_status_event_updates_order_and_history(orders):
+    created = orders.service.create_order({'pizza': 'Margherita', 'address': '3 Sadovaya Street'})
+    order_id = created['order_id']
+
+    channel = FakeChannel()
+    body = json.dumps({
+        'order_id': order_id,
+        'status': 'rejected',
+        'reason': 'Out of ingredients: mozzarella',
+    })
+
+    orders.on_status(channel, FakeMethod(delivery_tag=9), None, body)
+
+    assert orders.service.get_order(order_id)['status'] == 'rejected'
+
+    assert len(channel.published) == 1
+    event = channel.published[0]
+    assert event['routing_key'] == orders.HISTORY_QUEUE
+    assert event['body']['status'] == 'rejected'
+    assert event['body']['reason'] == 'Out of ingredients: mozzarella'
+    assert channel.acked == [9]
+
+
+# 8. A status event for an unknown order is acknowledged but not forwarded
+def test_status_event_for_unknown_order(orders):
+    channel = FakeChannel()
+
+    orders.on_status(channel, FakeMethod(), None, json.dumps({
+        'order_id': 999999, 'status': 'cooking'}))
+
+    assert channel.published == []
+    assert channel.acked == [1]
+
+
+# 9. The menu RPC client maps 404 to None and transport errors to MenuUnavailable
+def test_menu_client_response_mapping(orders):
+    client = orders.MenuClient('localhost')
+
+    class Rpc404:
+        def call(self, queue, request):
+            return {'status': 404, 'body': {'error': 'Pizza not found'}}
+
+    class Rpc500:
+        def call(self, queue, request):
+            return {'status': 500, 'body': {'error': 'boom'}}
+
+    class RpcBroken:
+        def call(self, queue, request):
+            raise TimeoutError('no response')
+
+    client.rpc = Rpc404()
+    assert client.get_pizza('sushi') is None
+
+    client.rpc = Rpc500()
+    with pytest.raises(orders.MenuUnavailable):
+        client.get_pizza('pepperoni')
+
+    client.rpc = RpcBroken()
+    with pytest.raises(orders.MenuUnavailable):
+        client.get_pizza('pepperoni')
+
+
+# 10. When the menu service is down, order creation returns 503
+def test_create_order_when_menu_is_unavailable(orders, monkeypatch):
+    class BrokenMenu:
+        def get_pizza(self, code):
+            raise orders.MenuUnavailable('connection refused')
+
+    monkeypatch.setattr(orders.service, 'menu', BrokenMenu())
+
+    status, body = orders.handle_request({
+        'action': 'create_order',
+        'payload': {'pizza': 'Pepperoni', 'address': '1 Main Street'},
+    })
+
+    assert status == 503
+    assert 'Menu service is unavailable' in body['error']
